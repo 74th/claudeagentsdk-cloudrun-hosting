@@ -1,0 +1,8 @@
+claude-agent-sdk==0.2.128
+fastapi==0.141.1
+google-auth==2.47.0
+google-cloud-aiplatform==1.163.0
+google-cloud-storage==2.19.0
+pydantic==2.13.4
+PyYAML==6.0.3
+uvicorn[standard]==0.41.0

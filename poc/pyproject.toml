@@ -1,0 +1,16 @@
+[project]
+name = "gemini-enterprise-hosting-contract-poc"
+version = "0.1.0"
+description = "Gemini Enterprise Agent Platform hosting contract verification"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "claude-agent-sdk==0.2.128",
+  "google-cloud-aiplatform==1.163.0",
+  "google-cloud-storage==2.19.0",
+  "google-auth==2.47.0",
+  "httpx==0.28.1",
+  "mcp==1.29.0",
+]
+
+[tool.uv]
+package = false

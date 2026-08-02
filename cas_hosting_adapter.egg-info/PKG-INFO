@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: cas-hosting-adapter
+Version: 0.1.0
+Summary: Claude Agent SDK adapter for Gemini Enterprise Agent Platform
+Requires-Python: <3.13,>=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: claude-agent-sdk==0.2.128
+Requires-Dist: fastapi==0.141.1
+Requires-Dist: google-auth==2.47.0
+Requires-Dist: google-cloud-aiplatform==1.163.0
+Requires-Dist: google-cloud-storage==2.19.0
+Requires-Dist: pydantic==2.13.4
+Requires-Dist: PyYAML==6.0.3
+Requires-Dist: uvicorn[standard]==0.41.0
