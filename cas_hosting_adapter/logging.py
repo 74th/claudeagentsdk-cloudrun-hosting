@@ -22,10 +22,11 @@ class InvocationLogger(logging.LoggerAdapter[logging.Logger]):
 
 def invocation_logger(
     *, user_id: str, session_id: str | None = None, run_id: str | None = None,
-    operation_name: str | None = None,
+    execution_name: str | None = None,
+    error_code: str | None = None,
 ) -> InvocationLogger:
     return InvocationLogger(
         logging.getLogger("cas_hosting_adapter"),
         {"user_id": user_id, "session_id": session_id, "run_id": run_id,
-         "operation_name": operation_name},
+         "execution_name": execution_name, "error_code": error_code},
     )

@@ -3,15 +3,18 @@ from uuid import uuid4
 
 import pytest
 
-from cas_hosting_adapter.errors import WorkspaceCorruptedError
-from cas_hosting_adapter.protocols import InMemorySnapshotStore
+from cas_hosting_adapter.errors import SessionIncompatibleError, WorkspaceCorruptedError
+from cas_hosting_adapter.protocols import InMemorySnapshotStore, InMemoryWorkspaceStore
 from cas_hosting_adapter.workspace_store import (
     RunLockStore,
     StoragePaths,
     archive_snapshot,
+    create_workspace_snapshot,
     prepare_workspace,
+    prepare_workspace_from_reference,
     request_directories,
     restore_verified_snapshot,
+    restore_workspace_snapshot,
     save_immutable_snapshot,
     snapshot_manifest,
 )
@@ -76,27 +79,81 @@ def test_initializer_runs_only_without_committed_snapshot() -> None:
     assert calls == ["workspace"]
 
 
+def test_workspace_reference_requires_committed_manifest_and_matching_versions() -> None:
+    store = InMemoryWorkspaceStore()
+    run_id = uuid4()
+    with request_directories() as source:
+        (source.workspace / "file.txt").write_text("workspace")
+        reference, committed_manifest = create_workspace_snapshot(
+            store,
+            object_key="snapshots/run-1.tar.gz",
+            source=source,
+            run_id=run_id,
+            sdk_version="0.2.128",
+            max_bytes=1024,
+        )
+
+    with request_directories() as destination:
+        restore_workspace_snapshot(
+            store,
+            reference,
+            committed_manifest,
+            destination,
+            max_bytes=1024,
+            expected_schema_version="1",
+            expected_sdk_version="0.2.128",
+        )
+        assert (destination.workspace / "file.txt").read_text() == "workspace"
+
+    with request_directories() as destination, pytest.raises(SessionIncompatibleError):
+        restore_workspace_snapshot(
+            store,
+            reference,
+            committed_manifest,
+            destination,
+            max_bytes=1024,
+            expected_schema_version="1",
+            expected_sdk_version="other",
+        )
+
+
+def test_workspace_initializer_runs_only_for_absent_reference() -> None:
+    calls: list[str] = []
+    with request_directories() as directories:
+        prepare_workspace_from_reference(
+            InMemoryWorkspaceStore(),
+            reference=None,
+            manifest=None,
+            directories=directories,
+            initializer=lambda workspace: calls.append(workspace.name),
+            max_bytes=1024,
+            expected_schema_version="1",
+            expected_sdk_version="0.2.128",
+        )
+    assert calls == ["workspace"]
+
+
 def test_active_run_lock_rejects_conflict_and_requires_its_generation() -> None:
     locks = RunLockStore(InMemorySnapshotStore())
     lock, generation = locks.acquire("locks/session", uuid4(), pending_ttl=timedelta(minutes=1))
     with pytest.raises(FileExistsError):
         locks.acquire("locks/session", uuid4(), pending_ttl=timedelta(minutes=1))
-    bound, bound_generation = locks.bind_operation(
+    bound, bound_generation = locks.bind_execution(
         "locks/session",
         generation,
         lock,
-        operation_name="operations/1",
+        execution_name="executions/1",
         running_ttl=timedelta(minutes=30),
     )
-    assert bound.operation_name == "operations/1"
+    assert bound.execution_name == "executions/1"
     with pytest.raises(FileNotFoundError):
         locks.release("locks/session", generation)
     with pytest.raises(FileNotFoundError):
-        locks.bind_operation(
+        locks.bind_execution(
             "locks/session",
             generation,
             lock,
-            operation_name="operations/2",
+            execution_name="executions/2",
             running_ttl=timedelta(minutes=30),
         )
     locks.release("locks/session", bound_generation)

@@ -67,6 +67,22 @@ class OperationError(HostingError):
     detail = ErrorDetail("operation_error", True, "operation")
 
 
+class ExecutionNotFoundError(HostingError):
+    detail = ErrorDetail("execution_not_found", False, "execution")
+
+
+class ExecutionTemporaryError(HostingError):
+    detail = ErrorDetail("execution_temporary", True, "execution")
+
+
+class ExecutionPermissionError(HostingError):
+    detail = ErrorDetail("execution_permission_denied", False, "execution")
+
+
+class ExecutionQuotaError(HostingError):
+    detail = ErrorDetail("execution_quota_exceeded", False, "execution")
+
+
 class ActiveRunConflictError(HostingError):
     detail = ErrorDetail("active_run", False, "conflict")
 

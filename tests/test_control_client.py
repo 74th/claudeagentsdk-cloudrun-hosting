@@ -1,0 +1,120 @@
+import pytest
+
+from cas_hosting_adapter.control_client import ControlClient
+from cas_hosting_adapter.in_memory_chat_store import InMemoryChatStore
+from cas_hosting_adapter.models import ChatEvent, ExecutionReference, ExecutionState, Run, RunState
+from cas_hosting_adapter.protocols import InMemoryExecutionBackend
+
+
+def test_control_client_reserves_and_starts_a_run() -> None:
+    store = InMemoryChatStore()
+    client = ControlClient(store, InMemoryExecutionBackend())
+    session = client.create_session("user", title="test")
+    run = client.reserve_and_start(
+        Run(
+            user_id="user", session_id=session.id, workspace_id=session.workspace_id,
+            idempotency_key="key",
+        ),
+        "hello",
+    )
+    assert run.execution is not None
+    assert store.list_events(run.id)[0].payload == {"content": "hello"}
+
+
+def test_control_client_releases_session_after_dispatch_failure() -> None:
+    class FailingBackend(InMemoryExecutionBackend):
+        def start(self, run_id):
+            raise RuntimeError("unavailable")
+
+    store = InMemoryChatStore()
+    client = ControlClient(store, FailingBackend())
+    session = client.create_session("user")
+    run = Run(
+        user_id="user", session_id=session.id, workspace_id=session.workspace_id,
+        idempotency_key="key",
+    )
+    with pytest.raises(RuntimeError):
+        client.reserve_and_start(run, "hello")
+    assert store.get_run_for_job(run.id).state.value == "dispatch_failed"
+    assert store.get_session("user", session.id).active_run_id is None
+
+
+def test_control_client_reuses_idempotent_run_for_redelivery() -> None:
+    store = InMemoryChatStore()
+    backend = InMemoryExecutionBackend()
+    client = ControlClient(store, backend)
+    session = client.create_session("user")
+    first = Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
+                idempotency_key="key")
+    started = client.reserve_and_start(first, "hello")
+    retried = client.reserve_and_start(
+        Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
+            idempotency_key="key"),
+        "hello",
+    )
+    assert retried.id == started.id
+    assert retried.execution == started.execution
+
+
+def test_late_execution_save_never_revives_a_terminal_run() -> None:
+    store = InMemoryChatStore()
+    session = store.create_session("user")
+    run = Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
+              idempotency_key="key")
+    store.reserve_run(run, ChatEvent(id="user", run_id=run.id, sequence=0, type="user"))
+    store.runs[run.id] = run.model_copy(update={"state": RunState.COMPLETED})
+
+    saved = store.save_execution(run.id, ExecutionReference(
+        backend="test", name="executions/late", identity="late"
+    ))
+
+    assert saved.state is RunState.COMPLETED
+
+
+def test_reconcile_marks_success_without_snapshot_as_persistence_failure() -> None:
+    store = InMemoryChatStore()
+    backend = InMemoryExecutionBackend()
+    client = ControlClient(store, backend)
+    session = client.create_session("user")
+    run = client.reserve_and_start(
+        Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
+            idempotency_key="key"),
+        "hello",
+    )
+    assert run.execution is not None
+    backend.set_state(run.execution, ExecutionState.SUCCEEDED)
+    assert client.reconcile(run.id, holder="reconciler").state is RunState.PERSISTENCE_FAILED
+
+
+def test_cancel_commits_only_after_backend_confirms_cancelled() -> None:
+    store = InMemoryChatStore()
+    backend = InMemoryExecutionBackend()
+    client = ControlClient(store, backend)
+    session = client.create_session("user")
+    run = client.reserve_and_start(
+        Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
+            idempotency_key="key"),
+        "hello",
+    )
+    assert client.cancel(run.id).state is RunState.CANCELLED
+
+
+def test_subscription_deduplicates_catchup_and_listener_boundary() -> None:
+    store = InMemoryChatStore()
+    client = ControlClient(store, InMemoryExecutionBackend())
+    session = client.create_session("user")
+    run = client.reserve_and_start(
+        Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
+            idempotency_key="key"),
+        "hello",
+    )
+    received: list[str] = []
+    unsubscribe = client.subscribe_from_cursor(
+        run.id, None, lambda event: received.append(event.id)
+    )
+    store.append_event(store.list_events(run.id)[0])
+    store.append_event(type(store.list_events(run.id)[0])(
+        id="agent", run_id=run.id, sequence=0, type="agent", payload={}
+    ))
+    unsubscribe()
+    assert received == [f"user:{run.id}", "agent"]

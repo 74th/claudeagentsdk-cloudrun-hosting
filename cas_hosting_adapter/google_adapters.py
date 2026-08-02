@@ -1,9 +1,11 @@
 """Thin Google Cloud adapters isolated from the domain logic."""
 from __future__ import annotations
 
+import hashlib
 from typing import Any, cast
 
-from .errors import OperationError, WorkspaceError
+from .errors import WorkspaceError
+from .models import WorkspaceReference
 
 
 class GoogleCloudSnapshotStore:
@@ -38,48 +40,51 @@ class GoogleCloudSnapshotStore:
             raise WorkspaceError("GCS snapshot delete failed") from error
 
 
-class AgentPlatformOperations:
-    def __init__(self, agent_engines: Any, agent_engine_name: str) -> None:
-        self.agent_engines = agent_engines
-        self.agent_engine_name = agent_engine_name
+class GCSWorkspaceStore:
+    """Immutable WorkspaceStore adapter using GCS generation preconditions."""
 
-    def start(self, *, input_payload: dict[str, Any]) -> str:
+    def __init__(self, bucket: Any) -> None:
+        self._bucket = bucket
+
+    def create(self, object_key: str, data: bytes) -> WorkspaceReference:
         try:
-            result = self.agent_engines.run_query_job(
-                name=self.agent_engine_name, config=input_payload
+            blob = self._bucket.blob(object_key)
+            blob.upload_from_string(data, if_generation_match=0)
+            blob.reload()
+            if blob.generation is None:
+                raise WorkspaceError("GCS did not return an object generation")
+            return WorkspaceReference(
+                object_key=object_key,
+                version=str(blob.generation),
+                sha256=hashlib.sha256(data).hexdigest(),
+                size=len(data),
             )
-            name = getattr(result, "job_name", None)
-            if not isinstance(name, str):
-                raise OperationError("Agent Platform did not return an operation name")
-            return name
-        except OperationError:
+        except WorkspaceError:
             raise
         except Exception as error:
-            raise OperationError("Agent Platform async start failed") from error
+            raise WorkspaceError("GCS conditional snapshot create failed") from error
 
-    def get(self, operation_name: str) -> str:
+    def get(self, reference: WorkspaceReference) -> bytes:
         try:
-            result = self.agent_engines.check_query_job(
-                name=operation_name, config={"retrieve_result": True}
+            data = cast(
+                bytes,
+                self._bucket.blob(
+                    reference.object_key, generation=int(reference.version)
+                ).download_as_bytes(),
             )
-            status = getattr(result, "status", None)
-            if not isinstance(status, str):
-                raise OperationError("Agent Platform did not return an operation status")
-            # Agent Platform currently reports a user-cancelled async job as
-            # FAILED with a result message rather than as CANCELLED.
-            result_message = getattr(result, "result", None)
-            if status.upper() == "FAILED" and "cancelled by user" in str(result_message).lower():
-                return "CANCELLED"
-            return status
-        except OperationError:
+            if hashlib.sha256(data).hexdigest() != reference.sha256:
+                raise WorkspaceError("GCS snapshot hash mismatch")
+            return data
+        except WorkspaceError:
             raise
         except Exception as error:
-            raise OperationError("Agent Platform operation status failed") from error
+            raise WorkspaceError("GCS snapshot download failed") from error
 
-    def cancel(self, operation_name: str) -> None:
+    def delete(self, reference: WorkspaceReference) -> None:
         try:
-            self.agent_engines.cancel_query_job(
-                name=self.agent_engine_name, config={"operation_name": operation_name}
+            generation = int(reference.version)
+            self._bucket.blob(reference.object_key, generation=generation).delete(
+                if_generation_match=generation
             )
         except Exception as error:
-            raise OperationError("Agent Platform cancellation failed") from error
+            raise WorkspaceError("GCS snapshot delete failed") from error

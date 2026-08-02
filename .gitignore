@@ -1,3 +1,6 @@
 .env
 .venv
 .work
+*.tfstate
+*.tfstate.backup
+.terraform

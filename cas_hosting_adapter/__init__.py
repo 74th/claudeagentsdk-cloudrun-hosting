@@ -1,7 +1,6 @@
-"""Claude Agent SDK adapter for Gemini Enterprise Agent Platform."""
+"""Claude Agent SDK adapter for Cloud Run Jobs."""
 
-from .api_server import create_app
-from .client import HostingClient
-from .models import HostingSettings
+from .control_client import ControlClient
+from .models import Run, Session
 
-__all__ = ["HostingClient", "HostingSettings", "create_app"]
+__all__ = ["ControlClient", "Run", "Session"]

@@ -15,9 +15,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from uuid import UUID
 
-from .errors import WorkspaceCorruptedError, WorkspaceTooLargeError
-from .models import SnapshotManifest, SnapshotReference
-from .protocols import SnapshotStore
+from .errors import SessionIncompatibleError, WorkspaceCorruptedError, WorkspaceTooLargeError
+from .models import SnapshotManifest, SnapshotReference, WorkspaceReference
+from .protocols import SnapshotStore, WorkspaceStore
 
 
 def opaque_id(value: str) -> str:
@@ -70,7 +70,7 @@ class ActiveRunLock:
     state: str
     created_at: datetime
     expires_at: datetime
-    operation_name: str | None = None
+    execution_name: str | None = None
 
     def to_bytes(self) -> bytes:
         return json.dumps(
@@ -79,7 +79,7 @@ class ActiveRunLock:
                 "state": self.state,
                 "created_at": self.created_at.isoformat(),
                 "expires_at": self.expires_at.isoformat(),
-                "operation_name": self.operation_name,
+                "execution_name": self.execution_name,
             }, sort_keys=True,
         ).encode()
 
@@ -96,18 +96,18 @@ class RunLockStore:
         generation = self.store.upload(object_path, lock.to_bytes(), if_generation_match=0)
         return lock, generation
 
-    def bind_operation(
+    def bind_execution(
         self,
         object_path: str,
         generation: int,
         lock: ActiveRunLock,
         *,
-        operation_name: str,
+        execution_name: str,
         running_ttl: timedelta,
     ) -> tuple[ActiveRunLock, int]:
         now = datetime.now(UTC)
         bound = ActiveRunLock(
-            lock.run_id, "running", lock.created_at, now + running_ttl, operation_name
+            lock.run_id, "running", lock.created_at, now + running_ttl, execution_name
         )
         # Keep the lock continuously present.  Deleting and recreating it leaves a
         # window where a second invocation can acquire the same session.
@@ -231,6 +231,89 @@ def prepare_workspace(
     if committed_snapshot is not None:
         restore_verified_snapshot(
             snapshot_store, committed_snapshot, directories, max_bytes=max_bytes
+        )
+    elif initializer is not None:
+        initializer(directories.workspace)
+
+
+def create_workspace_snapshot(
+    store: WorkspaceStore,
+    *,
+    object_key: str,
+    source: RequestDirectories,
+    run_id: UUID,
+    sdk_version: str,
+    max_bytes: int,
+) -> tuple[WorkspaceReference, SnapshotManifest]:
+    """Archive and conditionally persist a snapshot through the new port."""
+    archive = source.root / "snapshot.tar.gz"
+    uncompressed, _compressed = archive_snapshot(source, archive, max_bytes=max_bytes)
+    manifest = snapshot_manifest(
+        run_id=run_id,
+        sdk_version=sdk_version,
+        archive_path=archive,
+        uncompressed_bytes=uncompressed,
+    )
+    try:
+        reference = store.create(object_key, archive.read_bytes())
+    finally:
+        archive.unlink(missing_ok=True)
+    if reference.sha256 != manifest.sha256:
+        raise WorkspaceCorruptedError("WorkspaceStore returned a mismatched snapshot hash")
+    return reference, manifest
+
+
+def restore_workspace_snapshot(
+    store: WorkspaceStore,
+    reference: WorkspaceReference | None,
+    manifest: SnapshotManifest | None,
+    destination: RequestDirectories,
+    *,
+    max_bytes: int,
+    expected_schema_version: str,
+    expected_sdk_version: str,
+) -> None:
+    """Restore only a committed, verified snapshot before agent execution."""
+    if reference is None or manifest is None:
+        raise WorkspaceCorruptedError("a committed workspace snapshot is required")
+    if manifest.schema_version != expected_schema_version:
+        raise SessionIncompatibleError("snapshot schema version is incompatible")
+    if manifest.claude_sdk_version != expected_sdk_version:
+        raise SessionIncompatibleError("snapshot SDK version is incompatible")
+    if manifest.sha256 != reference.sha256:
+        raise WorkspaceCorruptedError("snapshot manifest and reference hash differ")
+    data = store.get(reference)
+    if hashlib.sha256(data).hexdigest() != reference.sha256:
+        raise WorkspaceCorruptedError("WorkspaceStore returned a corrupted snapshot")
+    archive = destination.root / "download.tar.gz"
+    archive.write_bytes(data)
+    try:
+        extract_snapshot(archive, destination, max_bytes=max_bytes)
+    finally:
+        archive.unlink(missing_ok=True)
+
+
+def prepare_workspace_from_reference(
+    store: WorkspaceStore,
+    *,
+    reference: WorkspaceReference | None,
+    manifest: SnapshotManifest | None,
+    directories: RequestDirectories,
+    initializer: Callable[[Path], None] | None,
+    max_bytes: int,
+    expected_schema_version: str,
+    expected_sdk_version: str,
+) -> None:
+    """Restore a committed workspace or initialize a new one, never both."""
+    if reference is not None or manifest is not None:
+        restore_workspace_snapshot(
+            store,
+            reference,
+            manifest,
+            directories,
+            max_bytes=max_bytes,
+            expected_schema_version=expected_schema_version,
+            expected_sdk_version=expected_sdk_version,
         )
     elif initializer is not None:
         initializer(directories.workspace)
