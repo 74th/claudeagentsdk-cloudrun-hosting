@@ -21,11 +21,15 @@ Terraform 構成は Cloud Run Job、Firestore database と必要な index、GCS 
 - **THEN** 制御主体とジョブ実行主体にプロジェクト全体の広域管理者権限が付与されていない
 
 ### Requirement: バージョン付きリリース設定を検証する
-システムは project、region、container image、Cloud Run Job、Firestore、GCS、サービスアカウント、実行制限を version 付き設定で管理し、未知の項目、不正な組み合わせ、未対応 schema version をクラウド変更前に拒否しなければならない（SHALL）。
+システムは project、region、container image、Cloud Run Job、Firestore database名、GCS、サービスアカウント、実行制限を version 付き設定で管理し、未知の項目、不正な組み合わせ、未対応 schema version をクラウド変更前に拒否しなければならない（SHALL）。Firestore database名は空文字列および `(default)` を許可してはならない（MUST NOT）。
 
 #### Scenario: 不正な設定を読み込む
-- **WHEN** リリース設定に未知の項目または region の不整合がある
+- **WHEN** リリース設定に未知の項目、region の不整合、空のFirestore database名、または `(default)` がある
 - **THEN** デプロイ処理は対象項目を示して失敗し、クラウドリソースを変更しない
+
+#### Scenario: 名前付きFirestore databaseを設定する
+- **WHEN** 利用者が有効な名前付きFirestore database名を含むリリース設定を読み込む
+- **THEN** そのdatabase名はTerraform入力とCloud Run Jobの非秘密環境設定へ同じ値で渡される
 
 ### Requirement: Cloud Run Jobへ実行設定を適用する
 デプロイ処理はコンテナイメージ、CPU、メモリ、task timeout、再試行回数、同時タスク数、実行サービスアカウント、必要な非秘密環境設定を Cloud Run Job へ適用しなければならない（SHALL）。プラットフォームの自動タスク再試行はエージェントの二重実行を防げる設定としなければならない（SHALL）。
@@ -35,11 +39,15 @@ Terraform 構成は Cloud Run Job、Firestore database と必要な index、GCS 
 - **THEN** Cloud Run Job は指定された実行制限とサービスアカウントを持つ revision へ更新される
 
 ### Requirement: Firestoreのクエリ要件を配備する
-デプロイ構成はユーザー別セッション一覧と run イベント購読に必要な database mode、location、index を明示し、アプリケーション設定との不一致を拒否しなければならない（SHALL）。
+デプロイ構成はリリース設定で指定された名前付きFirestore Native databaseの mode、location、index を明示し、アプリケーション設定との不一致を拒否しなければならない（SHALL）。デプロイ構成は `(default)` databaseを作成または参照してはならない（MUST NOT）。
 
 #### Scenario: セッション一覧用indexを計画する
-- **WHEN** Terraform plan を作成する
-- **THEN** セッションを更新日時順にページングするために必要な index が計画へ含まれる
+- **WHEN** 有効な名前付きFirestore databaseを指定してTerraform plan を作成する
+- **THEN** セッションを更新日時順にページングするために必要な index が、その指定databaseを対象として計画へ含まれる
+
+#### Scenario: サンプルdatabaseを新規環境へ適用する
+- **WHEN** `claude-agent-chat` を指定した有効な環境設定で Terraform を適用する
+- **THEN** Firestore Native database `claude-agent-chat` と必要な index が作成され、`(default)` databaseはこの構成によって作成または変更されない
 
 ### Requirement: 保存データの保持期限を構成する
 デプロイ構成は snapshot と一時オブジェクトの lifecycle、および run・イベントの保持方針を設定可能にし、既定値を配備前に表示しなければならない（SHALL）。
@@ -54,4 +62,3 @@ Terraform 構成は Cloud Run Job、Firestore database と必要な index、GCS 
 #### Scenario: 秘密情報らしい設定を指定する
 - **WHEN** 利用者が禁止された秘密情報項目をリリース設定へ記述する
 - **THEN** 検証はクラウド変更前に設定を拒否する
-

@@ -34,7 +34,7 @@ def test_release_config_builds_the_google_cloud_settings(monkeypatch, tmp_path) 
     release = tmp_path / "release.yaml"
     release.write_text(
         "project_id: project\nregion: us-central1\nfirestore_location: us-central1\n"
-        "bucket_name: bucket\nimage: image\njob_name: job\n"
+        "firestore_database: claude-agent-chat\nbucket_name: bucket\nimage: image\njob_name: job\n"
     )
     captured: list[GoogleCloudSettings] = []
 
@@ -49,7 +49,7 @@ def test_release_config_builds_the_google_cloud_settings(monkeypatch, tmp_path) 
         GoogleCloudSettings(
             project="project",
             region="us-central1",
-            firestore_database="(default)",
+            firestore_database="claude-agent-chat",
             bucket_name="bucket",
             job_name="job",
         )

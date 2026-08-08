@@ -6,7 +6,8 @@ def validate(path: Path) -> None:
     text = (path / "main.tf").read_text()
     required = (
         "google_cloud_run_v2_job", "max_retries", "google_firestore_index",
-        "lifecycle_rule", "google_service_account",
+        "lifecycle_rule", "google_service_account", "FIRESTORE_DATABASE",
+        "google_firestore_database.chat.name", "var.firestore_database",
     )
     missing = [value for value in required if value not in text]
     if missing:

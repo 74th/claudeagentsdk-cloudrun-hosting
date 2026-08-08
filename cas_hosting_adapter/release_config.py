@@ -14,6 +14,7 @@ class ReleaseConfig(BaseModel):
     project_id: str
     region: str
     firestore_location: str
+    firestore_database: str = Field(pattern=r"^[a-z][a-z0-9-]{2,62}$")
     bucket_name: str
     image: str
     job_name: str = "test-claudesdk-cloudrun"
@@ -30,6 +31,8 @@ class ReleaseConfig(BaseModel):
     def validate_locations(self) -> ReleaseConfig:
         if self.region != self.firestore_location:
             raise ValueError("region and firestore_location must match")
+        if self.firestore_database == "(default)":
+            raise ValueError("firestore_database must be a named database, not (default)")
         if not self.vertex_region:
             raise ValueError("vertex_region is required")
         if not self.claude_model.startswith("claude-"):
@@ -41,7 +44,8 @@ class ReleaseConfig(BaseModel):
 
     def terraform_variables(self) -> dict[str, object]:
         return {
-            "project_id": self.project_id, "region": self.region, "bucket_name": self.bucket_name,
+            "project_id": self.project_id, "region": self.region,
+            "firestore_database": self.firestore_database, "bucket_name": self.bucket_name,
             "image": self.image, "job_name": self.job_name,
             "task_timeout_seconds": self.task_timeout_seconds,
             "snapshot_retention_days": self.snapshot_retention_days,

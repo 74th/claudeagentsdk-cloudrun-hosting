@@ -13,11 +13,12 @@ from cas_hosting_adapter.models import ChatEvent, Run
 @pytest.mark.live_gcp
 def test_firestore_session_run_claim_and_event_contract() -> None:
     project = os.environ.get("CAS_HOSTING_FIRESTORE_TEST_PROJECT")
-    if not project:
-        pytest.skip("set CAS_HOSTING_FIRESTORE_TEST_PROJECT to run live Firestore checks")
+    database = os.environ.get("CAS_HOSTING_FIRESTORE_TEST_DATABASE")
+    if not project or not database:
+        pytest.skip("set CAS_HOSTING_FIRESTORE_TEST_PROJECT and CAS_HOSTING_FIRESTORE_TEST_DATABASE")
     from google.cloud import firestore
 
-    store = FirestoreChatStore(firestore.Client(project=project, database="(default)"))
+    store = FirestoreChatStore(firestore.Client(project=project, database=database))
     user_id = f"openspec-{uuid4()}"
     session = store.create_session(user_id)
     run = Run(

@@ -20,23 +20,23 @@ from cas_hosting_adapter.workspace_store import (
 )
 
 
-def _required_live_settings() -> tuple[str, str, str, str]:
+def _required_live_settings() -> tuple[str, str, str, str, str]:
     if os.environ.get("CAS_HOSTING_LIVE_GCP") != "1":
         pytest.skip("set CAS_HOSTING_LIVE_GCP=1 to run Google Cloud integration checks")
-    names = ("PROJECT", "REGION", "JOB", "BUCKET")
+    names = ("PROJECT", "REGION", "JOB", "BUCKET", "FIRESTORE_DATABASE")
     values = tuple(os.environ.get(f"CAS_HOSTING_LIVE_GCP_{name}", "") for name in names)
     if not all(values):
-        pytest.skip("set CAS_HOSTING_LIVE_GCP_PROJECT/REGION/JOB/BUCKET")
-    return values[0], values[1], values[2], values[3]
+        pytest.skip("set CAS_HOSTING_LIVE_GCP_PROJECT/REGION/JOB/BUCKET/FIRESTORE_DATABASE")
+    return values[0], values[1], values[2], values[3], values[4]
 
 
 @pytest.mark.live_gcp
 def test_google_cloud_ports_support_chat_snapshot_job_cancel_and_deduplication() -> None:
-    project, region, job_name, bucket_name = _required_live_settings()
+    project, region, job_name, bucket_name, database = _required_live_settings()
     from google.cloud import firestore, storage
     from google.cloud.run_v2 import ExecutionsClient, JobsClient
 
-    firestore_client = firestore.Client(project=project, database="(default)")
+    firestore_client = firestore.Client(project=project, database=database)
     chat_store = FirestoreChatStore(firestore_client)
     workspace_store = GCSWorkspaceStore(storage.Client(project=project).bucket(bucket_name))
     backend = CloudRunJobsBackend(

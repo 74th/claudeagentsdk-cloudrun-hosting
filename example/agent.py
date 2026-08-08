@@ -47,7 +47,7 @@ async def run() -> int:
     from google.cloud.storage import Client as StorageClient  # type: ignore[import-untyped]
 
     project = os.environ["GOOGLE_CLOUD_PROJECT"]
-    database = os.environ.get("FIRESTORE_DATABASE", "(default)")
+    database = os.environ["FIRESTORE_DATABASE"]
     model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5@20251001")
     LOGGER.info(
         "job.start run_id=%s execution=%s project=%s database=%s model=%s",

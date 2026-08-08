@@ -15,7 +15,9 @@ terraform -chdir=terraform validate
 python scripts/deploy.py release.example.yaml
 ```
 
-Cloud Run Job image は `example/Dockerfile` で build し、release 設定の image を更新して配備します。Job は `RUN_ID` だけを受け取り、入力・イベント・cancel flag は Firestore から取得します。Streamlit sample は `release.example.yaml`（テスト環境は `nnyn-dev`）を接続設定として使用します。ローカル ADC を準備してから起動してください。
+Cloud Run Job image は `example/Dockerfile` で build し、release 設定の image を更新して配備します。`release.example.yaml` は名前付き Firestore database `claude-agent-chat` を作成・利用します。Job は `RUN_ID` だけを受け取り、入力・イベント・cancel flag は Firestore から取得します。Streamlit sample は同じ release 設定（テスト環境は `nnyn-dev`）を接続設定として使用します。ローカル ADC を準備してから起動してください。
+
+この構成はプロジェクトの `(default)` database を作成・利用・変更しません。また、既存の `(default)` 内データを `claude-agent-chat` へ自動移行しません。既存データが必要な場合は、別途承認した移行手順を実施してください。
 
 Claude の推論には Vertex AI を使用します。既定は `us-east5` の Claude Haiku 4.5（`claude-haiku-4-5@20251001`）です。Cloud Run Job 自体は `us-central1` のままで、Job のサービスアカウントへ Vertex AI User 権限を付与します。API key は使用しません。
 

@@ -41,17 +41,47 @@ resource "google_storage_bucket" "workspace" {
   }
 }
 
-resource "google_firestore_database" "default" {
+# Stop managing an existing default database without deleting or changing it.
+# This permits a stateful upgrade to create the named chat database separately.
+removed {
+  from = google_firestore_database.default
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = google_firestore_index.sessions_by_updated
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = google_firestore_field.runs_by_id
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = google_firestore_index.events_by_sequence
+  lifecycle {
+    destroy = false
+  }
+}
+
+resource "google_firestore_database" "chat" {
   project     = var.project_id
-  name        = "(default)"
+  name        = var.firestore_database
   location_id = var.region
   type        = "FIRESTORE_NATIVE"
   depends_on  = [google_project_service.required]
 }
 
-resource "google_firestore_index" "sessions_by_updated" {
+resource "google_firestore_index" "chat_sessions_by_updated" {
   collection = "sessions"
-  database   = google_firestore_database.default.name
+  database   = google_firestore_database.chat.name
   fields {
     field_path = "updated_at"
     order      = "DESCENDING"
@@ -64,11 +94,11 @@ resource "google_firestore_index" "sessions_by_updated" {
 
 # JobRunner receives only a run ID, so it must resolve nested run documents
 # through a collection-group query without knowing the owning session first.
-resource "google_firestore_field" "runs_by_id" {
+resource "google_firestore_field" "chat_runs_by_id" {
   project    = var.project_id
   collection = "runs"
   field      = "id"
-  database   = google_firestore_database.default.name
+  database   = google_firestore_database.chat.name
   index_config {
     indexes {
       query_scope = "COLLECTION_GROUP"
@@ -78,10 +108,10 @@ resource "google_firestore_field" "runs_by_id" {
 }
 
 # Event streams are queried by sequence with event ID as a stable tie-breaker.
-resource "google_firestore_index" "events_by_sequence" {
+resource "google_firestore_index" "chat_events_by_sequence" {
   collection  = "events"
   query_scope = "COLLECTION_GROUP"
-  database    = google_firestore_database.default.name
+  database    = google_firestore_database.chat.name
   fields {
     field_path = "sequence"
     order      = "ASCENDING"
@@ -131,6 +161,10 @@ resource "google_cloud_run_v2_job" "agent" {
         env {
           name  = "WORKSPACE_BUCKET"
           value = google_storage_bucket.workspace.name
+        }
+        env {
+          name  = "FIRESTORE_DATABASE"
+          value = google_firestore_database.chat.name
         }
       }
     }

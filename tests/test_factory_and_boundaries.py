@@ -8,7 +8,7 @@ from cas_hosting_adapter.factory import GoogleCloudSettings
 def test_google_cloud_settings_rejects_cross_region_job_name() -> None:
     with pytest.raises(ValueError):
         GoogleCloudSettings(
-            project="project", region="us-central1", firestore_database="(default)",
+            project="project", region="us-central1", firestore_database="claude-agent-chat",
             bucket_name="bucket", job_name="projects/project/locations/europe-west1/jobs/job",
         )
 

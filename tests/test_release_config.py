@@ -8,6 +8,7 @@ from cas_hosting_adapter.release_config import ReleaseConfig, load_release_confi
 def test_example_release_config_is_valid() -> None:
     config = load_release_config(Path("release.example.yaml"))
     assert config.terraform_variables()["job_name"] == "test-claudesdk-cloudrun"
+    assert config.terraform_variables()["firestore_database"] == "claude-agent-chat"
     assert config.terraform_variables()["vertex_region"] == "us-east5"
     assert config.terraform_variables()["claude_model"] == "claude-haiku-4-5@20251001"
 
@@ -15,4 +16,11 @@ def test_example_release_config_is_valid() -> None:
 def test_release_config_rejects_location_mismatch() -> None:
     with pytest.raises(ValueError, match="must match"):
         ReleaseConfig(project_id="p", region="us-central1", firestore_location="asia-northeast1",
-                      bucket_name="bucket", image="image")
+                      firestore_database="claude-agent-chat", bucket_name="bucket", image="image")
+
+
+@pytest.mark.parametrize("database", ["", "(default)", "INVALID_DATABASE"])
+def test_release_config_rejects_default_or_invalid_firestore_database(database: str) -> None:
+    with pytest.raises(ValueError):
+        ReleaseConfig(project_id="p", region="us-central1", firestore_location="us-central1",
+                      firestore_database=database, bucket_name="bucket", image="image")

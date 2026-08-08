@@ -2,6 +2,7 @@ schema_version: "1"
 project_id: nnyn-dev
 region: us-central1
 firestore_location: us-central1
+firestore_database: claude-agent-chat
 bucket_name: nnyn-dev-agent-hosting-poc-us-central1
 image: us-central1-docker.pkg.dev/nnyn-dev/claude-agent/agent:latest
 job_name: test-claudesdk-cloudrun

@@ -72,7 +72,7 @@ def create_control_client_from_release_config(path: Path) -> ControlClient:
     settings = GoogleCloudSettings(
         project=release.project_id,
         region=release.region,
-        firestore_database="(default)",
+        firestore_database=release.firestore_database,
         bucket_name=release.bucket_name,
         job_name=release.job_name,
     )
