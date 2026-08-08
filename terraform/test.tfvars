@@ -1,7 +1,7 @@
 project_id    = "nnyn-dev"
 region        = "us-central1"
 bucket_name   = "nnyn-dev-agent-hosting-poc-us-central1"
-image         = "us-central1-docker.pkg.dev/nnyn-dev/claude-agent/agent@sha256:41da4e49baf0a2fa8424e0a6dfddc2170f1d4964fcc5de364c14861941f01c1e"
+image         = "us-central1-docker.pkg.dev/nnyn-dev/claude-agent/agent@sha256:7c015336128ae4a428071dee26b8c6d48b48e3df9d3b51f1a84f2fefe7ea1d46"
 job_name      = "test-claudesdk-cloudrun"
 vertex_region = "us-east5"
 claude_model  = "claude-haiku-4-5@20251001"

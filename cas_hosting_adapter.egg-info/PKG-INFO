@@ -29,7 +29,25 @@ terraform -chdir=terraform validate
 python scripts/deploy.py release.example.yaml
 ```
 
-Cloud Run Job image は `example/Dockerfile` で build し、release 設定の image を更新して配備します。Job は `RUN_ID` だけを受け取り、入力・イベント・cancel flag は Firestore から取得します。Streamlit sample は `uv sync --group streamlit` の後、`uv run streamlit run sample_frontend/app.py` で起動できます。
+Cloud Run Job image は `example/Dockerfile` で build し、release 設定の image を更新して配備します。Job は `RUN_ID` だけを受け取り、入力・イベント・cancel flag は Firestore から取得します。Streamlit sample は `release.example.yaml`（テスト環境は `nnyn-dev`）を接続設定として使用します。ローカル ADC を準備してから起動してください。
+
+Claude の推論には Vertex AI を使用します。既定は `us-east5` の Claude Haiku 4.5（`claude-haiku-4-5@20251001`）です。Cloud Run Job 自体は `us-central1` のままで、Job のサービスアカウントへ Vertex AI User 権限を付与します。API key は使用しません。
+
+```bash
+gcloud auth application-default login
+uv sync --group streamlit
+uv run streamlit run sample_frontend/app.py
+```
+
+サイドバーで `Release config` と `User ID` を指定すると、Firestore の session / run / event と Cloud Run Job の開始・cancel へ接続します。
+
+Cloud Run Job の実行状況は Cloud Logging で確認できます。`job.start`、`job.claim.acquired`、`claude_sdk.query.start`、SDK message ごとの `job.events.persisted`、終端の `job.finish` または `job.failed` を出力します。prompt や tool payload はログ出力しません。
+
+```bash
+gcloud logging read \
+  'resource.type="cloud_run_job" AND resource.labels.job_name="test-claudesdk-cloudrun"' \
+  --project=nnyn-dev --limit=100 --format='value(textPayload)'
+```
 
 テスト用リリースは `terraform/test.tfvars` を確認して `terraform -chdir=terraform apply -var-file=test.tfvars` を実行します。Streamlit で session を作成し、メッセージを送信して event を再訪・購読し、必要なら Cancel を選びます。Job の失敗や Execution 消失は status 確認時の reconciler で補正します。
 

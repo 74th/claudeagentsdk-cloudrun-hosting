@@ -2,11 +2,17 @@ from cas_hosting_adapter.control_client import ControlClient
 from cas_hosting_adapter.factory import GoogleCloudSettings
 from cas_hosting_adapter.in_memory_chat_store import InMemoryChatStore
 from cas_hosting_adapter.protocols import InMemoryExecutionBackend
-from sample_frontend.app import ChatViewModel, ManualIdentity, create_view_from_release_config
+from sample_frontend.app import (
+    SELECTED_SESSION_KEY,
+    ChatViewModel,
+    ManualIdentity,
+    create_view_from_release_config,
+)
 
 
 def test_manual_identity_is_replaceable_boundary() -> None:
     assert ManualIdentity(" user ").user_id() == "user"
+    assert SELECTED_SESSION_KEY == "selected-session-id"
 
 
 def test_view_model_creates_session_and_starts_run() -> None:

@@ -63,6 +63,9 @@ class ChatViewModel:
         return self._client.cancel(run_id)
 
 
+SELECTED_SESSION_KEY = "selected-session-id"
+
+
 def create_control_client_from_release_config(path: Path) -> ControlClient:
     """Connect the sample UI to the Firestore and Cloud Run resources in a release file."""
     release = load_release_config(path)
@@ -89,15 +92,27 @@ def render(identity: IdentityProvider, view: ChatViewModel | None = None) -> Non
         st.info("ControlClient を構成すると session / run / event / cancel を利用できます。")
         return
     if st.button("New session"):
-        st.session_state["session"] = view.create_session()
+        session = view.create_session()
+        st.session_state[SELECTED_SESSION_KEY] = session.id
+        st.rerun()
     page = view.sessions()
     if not page.sessions:
         st.info("New session を選択して会話を開始してください。")
         return
-    selected = st.selectbox(
-        "Sessions", page.sessions, format_func=lambda item: item.title or item.id
+    sessions_by_id = {session.id: session for session in page.sessions}
+    session_ids = list(sessions_by_id)
+    if st.session_state.get(SELECTED_SESSION_KEY) not in sessions_by_id:
+        st.session_state[SELECTED_SESSION_KEY] = session_ids[0]
+    selected_id = st.selectbox(
+        "Sessions",
+        session_ids,
+        format_func=lambda session_id: sessions_by_id[session_id].title or session_id,
+        key=SELECTED_SESSION_KEY,
     )
+    selected = sessions_by_id[selected_id]
     run_id = selected.active_run_id or st.session_state.get(f"last-run:{selected.id}")
+    if selected.active_run_id is not None:
+        st.session_state[f"last-run:{selected.id}"] = selected.active_run_id
     if run_id is not None:
         st.caption(f"Run ID: `{run_id}`")
     message = st.chat_input("Message")
