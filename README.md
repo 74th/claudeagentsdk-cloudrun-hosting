@@ -43,6 +43,19 @@ snapshot 容量、GCS retention、Job timeout、retry、IAM、DEBUG logging は 
 
 DEBUG log は prompt や tool payload を出力しない運用にし、snapshot は容量上限と retention を超えると削除対象になります。Cloud Run task retry は 0 が既定で、timeout、最小権限 IAM、Firestore / GCS の保持期間を変更する場合は release 設定と Terraform plan を確認してください。
 
+## Firestore TTL と legacy データの移行
+
+`run_retention_days` は session、run、event に共通する既定 30 日の保持期間です。Firestore TTL は期限到達後すぐに物理削除されるとは限らないため、アプリケーションの get/list/history も `expires_at` を検査します。Firestore の親削除は run と event の subcollection を連鎖削除しないため、3 つの collection group それぞれに TTL policy を設定しています。
+
+既存文書の補完は、対象 project と名前付き database を明示した次の command で dry-run してから行います。
+
+```sh
+uv run python scripts/backfill_firestore_ttl.py --project PROJECT --database DATABASE
+uv run python scripts/backfill_firestore_ttl.py --project PROJECT --database DATABASE --apply
+```
+
+apply 前に Firestore export を取得し、dry-run の対象件数と期限を確認してください。Terraform の TTL policy を適用した後、export、dry-run、内容確認、bounded batch の apply の順で実行します。TTL で削除されたデータはアプリケーションのロールバックでは復元できないため、復旧時は事前 export を別 database へ復元して検証後に切り替えます。
+
 Agent Platform の ASGI runtime / Sessions / Operations 契約は廃止され、旧 session を自動移行しません。
 
 ## Migration note

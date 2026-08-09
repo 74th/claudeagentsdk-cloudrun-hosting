@@ -31,7 +31,7 @@ streamlit = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["cas_hosting_adapter*", "example*", "sample_frontend*"]
+include = ["cas_hosting_adapter*", "example*", "sample_frontend*", "scripts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -28,7 +28,12 @@ example/__init__.py
 example/agent.py
 sample_frontend/__init__.py
 sample_frontend/app.py
+scripts/__init__.py
+scripts/backfill_firestore_ttl.py
+scripts/deploy.py
+scripts/validate_terraform.py
 tests/test_agent_adapter.py
+tests/test_backfill_firestore_ttl.py
 tests/test_cloud_run_backend.py
 tests/test_control_client.py
 tests/test_control_integration.py

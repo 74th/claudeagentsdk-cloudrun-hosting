@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC
 from pathlib import Path
 from time import sleep
 from typing import Protocol
@@ -10,7 +11,13 @@ from uuid import UUID, uuid4
 
 from cas_hosting_adapter.control_client import ControlClient
 from cas_hosting_adapter.factory import GoogleCloudSettings, create_google_cloud_control_client
-from cas_hosting_adapter.models import ChatEvent, Run, Session, SessionPage
+from cas_hosting_adapter.models import (
+    ChatEvent,
+    InitialSessionResult,
+    Run,
+    Session,
+    SessionPage,
+)
 from cas_hosting_adapter.release_config import load_release_config
 
 
@@ -53,6 +60,33 @@ class ChatViewModel:
             message,
         )
 
+    def start_new_session(self, message: str, idempotency_key: str) -> InitialSessionResult:
+        return self._client.start_session(self._identity.user_id(), message, idempotency_key)
+
+    def start_draft(self, message: str, idempotency_key: str) -> InitialSessionResult:
+        return self.start_new_session(message, idempotency_key)
+
+    def runs(self, session_id: str, *, page_size: int = 20) -> list[Run]:
+        runs: list[Run] = []
+        cursor: str | None = None
+        while True:
+            page = self._client.list_runs(
+                self._identity.user_id(), session_id, cursor=cursor, limit=page_size
+            )
+            runs.extend(page.runs)
+            if page.next_cursor is None:
+                return runs
+            cursor = page.next_cursor
+
+    def events_for_session(self, session_id: str) -> list[ChatEvent]:
+        events: list[ChatEvent] = []
+        for run in self.runs(session_id):
+            events.extend(self.events(run.id))
+        return events
+
+    def history(self, session_id: str) -> list[ChatEvent]:
+        return self.events_for_session(session_id)
+
     def subscribe(self, run_id: UUID, callback: Callable[[ChatEvent], None]) -> Callable[[], None]:
         return self._client.subscribe_from_cursor(run_id, None, callback)
 
@@ -64,6 +98,15 @@ class ChatViewModel:
 
 
 SELECTED_SESSION_KEY = "selected-session-id"
+DRAFT_STATE_KEY = "session-draft"
+DRAFT_IDEMPOTENCY_KEY = "draft-idempotency-key"
+
+
+def session_label(session: Session) -> str:
+    """Render the server-sorted session item without exposing IDs as titles."""
+    updated = session.updated_at.astimezone(UTC)
+    title = session.title.strip() or "Untitled session"
+    return f"{updated:%Y-%m-%d %H:%M:%S UTC} · {title}"
 
 
 def create_control_client_from_release_config(path: Path) -> ControlClient:
@@ -75,6 +118,7 @@ def create_control_client_from_release_config(path: Path) -> ControlClient:
         firestore_database=release.firestore_database,
         bucket_name=release.bucket_name,
         job_name=release.job_name,
+        run_retention_days=release.run_retention_days,
     )
     return create_google_cloud_control_client(settings)
 
@@ -91,61 +135,91 @@ def render(identity: IdentityProvider, view: ChatViewModel | None = None) -> Non
     if view is None:
         st.info("ControlClient を構成すると session / run / event / cancel を利用できます。")
         return
-    if st.button("New session"):
-        session = view.create_session()
-        st.session_state[SELECTED_SESSION_KEY] = session.id
+    if st.sidebar.button("New session", key="new-session"):
+        st.session_state.pop(SELECTED_SESSION_KEY, None)
+        st.session_state[DRAFT_STATE_KEY] = True
+        st.session_state[DRAFT_IDEMPOTENCY_KEY] = str(uuid4())
         st.rerun()
     page = view.sessions()
-    if not page.sessions:
-        st.info("New session を選択して会話を開始してください。")
-        return
     sessions_by_id = {session.id: session for session in page.sessions}
-    session_ids = list(sessions_by_id)
-    if st.session_state.get(SELECTED_SESSION_KEY) not in sessions_by_id:
-        st.session_state[SELECTED_SESSION_KEY] = session_ids[0]
-    selected_id = st.selectbox(
-        "Sessions",
-        session_ids,
-        format_func=lambda session_id: sessions_by_id[session_id].title or session_id,
-        key=SELECTED_SESSION_KEY,
-    )
-    selected = sessions_by_id[selected_id]
-    run_id = selected.active_run_id or st.session_state.get(f"last-run:{selected.id}")
-    if selected.active_run_id is not None:
-        st.session_state[f"last-run:{selected.id}"] = selected.active_run_id
-    if run_id is not None:
-        st.caption(f"Run ID: `{run_id}`")
+    draft = bool(st.session_state.get(DRAFT_STATE_KEY, False))
+    selected_id = st.session_state.get(SELECTED_SESSION_KEY)
+    if selected_id not in sessions_by_id:
+        selected_id = None
+        st.session_state.pop(SELECTED_SESSION_KEY, None)
+
+    st.sidebar.subheader("Sessions")
+    if not page.sessions:
+        st.sidebar.caption("保存済みセッションはありません。")
+    for session in page.sessions:
+        if st.sidebar.button(
+            session_label(session),
+            key=f"select-session:{session.id}",
+            type="primary" if session.id == selected_id else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state[SELECTED_SESSION_KEY] = session.id
+            st.session_state[DRAFT_STATE_KEY] = False
+            st.rerun()
+
+    if selected_id is None and not draft:
+        st.info("サイドバーから New session または既存セッションを選択してください。")
     message = st.chat_input("Message")
+    if draft:
+        st.subheader("New session")
+        st.caption("未送信の draft には Session ID はありません。")
+        if message:
+            key = st.session_state.setdefault(DRAFT_IDEMPOTENCY_KEY, str(uuid4()))
+            result = view.start_new_session(message, key)
+            st.session_state[SELECTED_SESSION_KEY] = result.session.id
+            st.session_state[f"last-run:{result.session.id}"] = result.run.id
+            st.session_state[DRAFT_STATE_KEY] = False
+            st.rerun()
+        return
+
+    if selected_id is None:
+        return
+    selected = view.session(selected_id)
+    runs = view.runs(selected.id)
+    current_run = next((run for run in runs if run.id == selected.active_run_id), None)
+    if current_run is None and runs:
+        current_run = runs[-1]
+    st.header(selected.title.strip() or "Untitled session")
+    id_left, id_right = st.columns(2)
+    id_left.caption(f"Session ID: `{selected.id}`")
+    execution_name = (
+        current_run.execution.name if current_run and current_run.execution else "pending"
+    )
+    id_right.caption(f"Cloud Run execution ID: `{execution_name}`")
+    if current_run is not None:
+        st.caption(f"Run ID: `{current_run.id}`")
     if message and selected.active_run_id is None:
-        run = view.start(selected, message, idempotency_key=str(uuid4()))
-        st.session_state[f"last-run:{selected.id}"] = run.id
-        run_id = run.id
-        st.success(f"Started run: `{run.id}`")
-    current_session = view.session(selected.id)
-    if run_id is not None:
+        result = view.start(selected, message, idempotency_key=str(uuid4()))
+        st.session_state[f"last-run:{selected.id}"] = result.id
+        st.rerun()
+    for event in view.history(selected.id):
+        if event.type == "user":
+            with st.chat_message("user"):
+                st.write(event.payload.get("content", ""))
+        elif event.type in {"agent", "final"}:
+            with st.chat_message("assistant"):
+                st.write(event.payload.get("content") or event.payload.get("output") or "")
+        elif event.type == "tool_started":
+            name = event.payload.get("name") or "ツール"
+            with st.status(f"実行中: {name}"):
+                st.json(event.payload.get("input", {}))
+        elif event.type == "tool_completed":
+            st.caption("ツール完了")
+        elif event.type == "progress" and event.payload.get("description"):
+            st.caption(f"進捗: {event.payload['description']}")
+    if current_run is not None and selected.active_run_id == current_run.id:
         if st.button("今すぐ更新"):
             st.rerun()
-        for event in view.events(run_id):
-            if event.type == "user":
-                with st.chat_message("user"):
-                    st.write(event.payload.get("content", ""))
-            elif event.type in {"agent", "final"}:
-                with st.chat_message("assistant"):
-                    st.write(event.payload.get("content") or event.payload.get("output") or "")
-            elif event.type == "tool_started":
-                name = event.payload.get("name") or "ツール"
-                with st.status(f"実行中: {name}"):
-                    st.json(event.payload.get("input", {}))
-            elif event.type == "tool_completed":
-                st.caption("ツール完了")
-            elif event.type == "progress" and event.payload.get("description"):
-                st.caption(f"進捗: {event.payload['description']}")
-        if current_session.active_run_id == run_id:
-            st.info("Cloud Run Job が実行中です。イベントを自動更新しています。")
-            sleep(2)
-            st.rerun()
-    if current_session.active_run_id and st.button("Cancel"):
-        state = view.cancel(current_session.active_run_id).state.value
+        st.info("Cloud Run Job が実行中です。イベントを自動更新しています。")
+        sleep(2)
+        st.rerun()
+    if selected.active_run_id and st.button("Cancel"):
+        state = view.cancel(selected.active_run_id).state.value
         st.warning("cancel requested" if state == "cancel_requested" else state)
 
 

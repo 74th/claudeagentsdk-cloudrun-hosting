@@ -1,12 +1,62 @@
 """Public, SDK-independent domain models."""
+
 from __future__ import annotations
 
+import hashlib
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
+
+_ID_NAMESPACES = {
+    "session": b"cas/session/v1",
+    "workspace": b"cas/workspace/v1",
+    "run": b"cas/run/v1",
+}
+
+
+def _deterministic_uuid(namespace: str, user_id: str, idempotency_key: str) -> UUID:
+    if not user_id.strip():
+        raise ValueError("user_id must not be blank")
+    if not idempotency_key.strip():
+        raise ValueError("idempotency_key must not be blank")
+    digest = hashlib.sha256(
+        _ID_NAMESPACES[namespace]
+        + b"\0"
+        + user_id.strip().encode("utf-8")
+        + b"\0"
+        + idempotency_key.encode("utf-8")
+    ).digest()
+    return UUID(bytes=digest[:16], version=4)
+
+
+def derive_session_id(user_id: str, idempotency_key: str) -> str:
+    """Derive the durable session ID for one initial request."""
+    return str(_deterministic_uuid("session", user_id, idempotency_key))
+
+
+def derive_workspace_id(user_id: str, idempotency_key: str) -> str:
+    """Derive the workspace ID paired with an initial session."""
+    return str(_deterministic_uuid("workspace", user_id, idempotency_key))
+
+
+def derive_run_id(user_id: str, idempotency_key: str) -> UUID:
+    """Derive the first run ID without embedding user input in the ID."""
+    return _deterministic_uuid("run", user_id, idempotency_key)
+
+
+def normalize_session_title(prompt: str, *, max_length: int = 80) -> str:
+    """Create a stable, human-readable title from the first non-empty line."""
+    if max_length < 1:
+        raise ValueError("max_length must be positive")
+    for line in prompt.splitlines():
+        normalized = re.sub(r"\s+", " ", line.strip())
+        if normalized:
+            return normalized[:max_length]
+    raise ValueError("prompt must contain a non-whitespace line")
 
 
 class RunState(StrEnum):
@@ -170,6 +220,24 @@ class SessionPage(BaseModel):
 
     sessions: list[Session]
     next_cursor: str | None = None
+
+
+class RunPage(BaseModel):
+    """Stable, ascending page of runs belonging to one session."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    runs: list[Run]
+    next_cursor: str | None = None
+
+
+class InitialSessionResult(BaseModel):
+    """Provider-neutral result of reserving a new session and its first run."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    session: Session
+    run: Run
 
 
 class ReconciliationLease(BaseModel):

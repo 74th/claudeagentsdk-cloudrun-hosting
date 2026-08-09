@@ -3,16 +3,33 @@ from cas_hosting_adapter.factory import GoogleCloudSettings
 from cas_hosting_adapter.in_memory_chat_store import InMemoryChatStore
 from cas_hosting_adapter.protocols import InMemoryExecutionBackend
 from sample_frontend.app import (
+    DRAFT_STATE_KEY,
     SELECTED_SESSION_KEY,
     ChatViewModel,
     ManualIdentity,
     create_view_from_release_config,
+    session_label,
 )
 
 
 def test_manual_identity_is_replaceable_boundary() -> None:
     assert ManualIdentity(" user ").user_id() == "user"
     assert SELECTED_SESSION_KEY == "selected-session-id"
+    assert DRAFT_STATE_KEY == "session-draft"
+
+
+def test_session_label_uses_utc_time_and_legacy_title_fallback() -> None:
+    from datetime import UTC, datetime
+
+    from cas_hosting_adapter.models import Session
+
+    session = Session(
+        id="session",
+        user_id="user",
+        workspace_id="workspace",
+        updated_at=datetime(2026, 8, 9, 1, 2, 3, tzinfo=UTC),
+    )
+    assert session_label(session) == "2026-08-09 01:02:03 UTC · Untitled session"
 
 
 def test_view_model_creates_session_and_starts_run() -> None:

@@ -1,4 +1,5 @@
 """Provider-neutral application assembly and Google Cloud client construction."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,8 +32,11 @@ class GoogleCloudSettings:
     firestore_database: str
     bucket_name: str
     job_name: str
+    run_retention_days: int = 30
 
     def __post_init__(self) -> None:
+        if self.run_retention_days < 1:
+            raise ValueError("run_retention_days must be positive")
         if not all(
             value.strip()
             for value in (
@@ -76,7 +80,9 @@ def create_google_cloud_control_client(settings: GoogleCloudSettings) -> Control
     """Build the Streamlit-facing control plane without exposing SDK clients."""
     clients = create_google_cloud_clients(settings)
     return ControlClient(
-        FirestoreChatStore(clients.firestore),
+        # Firestore is the control-plane source of truth for the same retention
+        # value exposed to the job deployment.
+        FirestoreChatStore(clients.firestore, retention_days=settings.run_retention_days),
         CloudRunJobsBackend(
             clients.jobs,
             clients.executions,

@@ -10,6 +10,10 @@ from cas_hosting_adapter.models import (
     User,
     WorkspaceReference,
     can_transition,
+    derive_run_id,
+    derive_session_id,
+    derive_workspace_id,
+    normalize_session_title,
 )
 
 
@@ -46,3 +50,24 @@ def test_run_state_machine_has_active_and_terminal_states() -> None:
     assert can_transition(RunState.CANCEL_REQUESTED, RunState.CANCELLED)
     assert not can_transition(RunState.COMPLETED, RunState.RUNNING)
     assert not can_transition(RunState.REQUESTED, RunState.COMPLETED)
+
+
+def test_initial_ids_are_stable_and_namespaced() -> None:
+    first = (
+        derive_session_id("user", "retry-key"),
+        derive_workspace_id("user", "retry-key"),
+        derive_run_id("user", "retry-key"),
+    )
+    assert first == (
+        derive_session_id("user", "retry-key"),
+        derive_workspace_id("user", "retry-key"),
+        derive_run_id("user", "retry-key"),
+    )
+    assert len(set(map(str, first))) == 3
+    assert first[0] != derive_session_id("other-user", "retry-key")
+
+
+def test_session_title_normalizes_whitespace_and_unicode_without_splitting() -> None:
+    assert normalize_session_title("\n  hello\t  世界  \nsecond") == "hello 世界"
+    title = normalize_session_title("😀" * 100)
+    assert title == "😀" * 80

@@ -12,7 +12,9 @@ def test_control_client_reserves_and_starts_a_run() -> None:
     session = client.create_session("user", title="test")
     run = client.reserve_and_start(
         Run(
-            user_id="user", session_id=session.id, workspace_id=session.workspace_id,
+            user_id="user",
+            session_id=session.id,
+            workspace_id=session.workspace_id,
             idempotency_key="key",
         ),
         "hello",
@@ -30,7 +32,9 @@ def test_control_client_releases_session_after_dispatch_failure() -> None:
     client = ControlClient(store, FailingBackend())
     session = client.create_session("user")
     run = Run(
-        user_id="user", session_id=session.id, workspace_id=session.workspace_id,
+        user_id="user",
+        session_id=session.id,
+        workspace_id=session.workspace_id,
         idempotency_key="key",
     )
     with pytest.raises(RuntimeError):
@@ -44,29 +48,76 @@ def test_control_client_reuses_idempotent_run_for_redelivery() -> None:
     backend = InMemoryExecutionBackend()
     client = ControlClient(store, backend)
     session = client.create_session("user")
-    first = Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
-                idempotency_key="key")
+    first = Run(
+        user_id="user",
+        session_id=session.id,
+        workspace_id=session.workspace_id,
+        idempotency_key="key",
+    )
     started = client.reserve_and_start(first, "hello")
     retried = client.reserve_and_start(
-        Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
-            idempotency_key="key"),
+        Run(
+            user_id="user",
+            session_id=session.id,
+            workspace_id=session.workspace_id,
+            idempotency_key="key",
+        ),
         "hello",
     )
     assert retried.id == started.id
     assert retried.execution == started.execution
 
 
+def test_start_session_lazily_creates_one_named_session() -> None:
+    store = InMemoryChatStore()
+    client = ControlClient(store, InMemoryExecutionBackend())
+    first = client.start_session("user", "  First prompt\nmore", "initial-key")
+    retry = client.start_session("user", "First prompt", "initial-key")
+    assert first.session.title == "First prompt"
+    assert retry.session.id == first.session.id
+    assert retry.run.id == first.run.id
+    assert len(store.sessions) == 1
+    assert len(store.runs) == 1
+
+
+def test_start_session_preserves_failed_dispatch_for_retry() -> None:
+    class FailingOnceBackend(InMemoryExecutionBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed = False
+
+        def start(self, run_id):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("unavailable")
+            return super().start(run_id)
+
+    store = InMemoryChatStore()
+    backend = FailingOnceBackend()
+    client = ControlClient(store, backend)
+    with pytest.raises(RuntimeError):
+        client.start_session("user", "hello", "initial-key")
+    retry = client.start_session("user", "hello", "initial-key")
+    assert retry.run.execution is not None
+    assert len(store.sessions) == 1
+    assert len(store.runs) == 1
+
+
 def test_late_execution_save_never_revives_a_terminal_run() -> None:
     store = InMemoryChatStore()
     session = store.create_session("user")
-    run = Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
-              idempotency_key="key")
+    run = Run(
+        user_id="user",
+        session_id=session.id,
+        workspace_id=session.workspace_id,
+        idempotency_key="key",
+    )
     store.reserve_run(run, ChatEvent(id="user", run_id=run.id, sequence=0, type="user"))
     store.runs[run.id] = run.model_copy(update={"state": RunState.COMPLETED})
 
-    saved = store.save_execution(run.id, ExecutionReference(
-        backend="test", name="executions/late", identity="late"
-    ))
+    saved = store.save_execution(
+        run.id, ExecutionReference(backend="test", name="executions/late", identity="late")
+    )
 
     assert saved.state is RunState.COMPLETED
 
@@ -77,8 +128,12 @@ def test_reconcile_marks_success_without_snapshot_as_persistence_failure() -> No
     client = ControlClient(store, backend)
     session = client.create_session("user")
     run = client.reserve_and_start(
-        Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
-            idempotency_key="key"),
+        Run(
+            user_id="user",
+            session_id=session.id,
+            workspace_id=session.workspace_id,
+            idempotency_key="key",
+        ),
         "hello",
     )
     assert run.execution is not None
@@ -92,8 +147,12 @@ def test_cancel_commits_only_after_backend_confirms_cancelled() -> None:
     client = ControlClient(store, backend)
     session = client.create_session("user")
     run = client.reserve_and_start(
-        Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
-            idempotency_key="key"),
+        Run(
+            user_id="user",
+            session_id=session.id,
+            workspace_id=session.workspace_id,
+            idempotency_key="key",
+        ),
         "hello",
     )
     assert client.cancel(run.id).state is RunState.CANCELLED
@@ -104,8 +163,12 @@ def test_subscription_deduplicates_catchup_and_listener_boundary() -> None:
     client = ControlClient(store, InMemoryExecutionBackend())
     session = client.create_session("user")
     run = client.reserve_and_start(
-        Run(user_id="user", session_id=session.id, workspace_id=session.workspace_id,
-            idempotency_key="key"),
+        Run(
+            user_id="user",
+            session_id=session.id,
+            workspace_id=session.workspace_id,
+            idempotency_key="key",
+        ),
         "hello",
     )
     received: list[str] = []
@@ -113,8 +176,10 @@ def test_subscription_deduplicates_catchup_and_listener_boundary() -> None:
         run.id, None, lambda event: received.append(event.id)
     )
     store.append_event(store.list_events(run.id)[0])
-    store.append_event(type(store.list_events(run.id)[0])(
-        id="agent", run_id=run.id, sequence=0, type="agent", payload={}
-    ))
+    store.append_event(
+        type(store.list_events(run.id)[0])(
+            id="agent", run_id=run.id, sequence=0, type="agent", payload={}
+        )
+    )
     unsubscribe()
     assert received == [f"user:{run.id}", "agent"]

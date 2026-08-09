@@ -1,3 +1,4 @@
 cas_hosting_adapter
 example
 sample_frontend
+scripts

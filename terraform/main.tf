@@ -92,6 +92,51 @@ resource "google_firestore_index" "chat_sessions_by_updated" {
   }
 }
 
+resource "google_firestore_field" "chat_sessions_expires_at" {
+  project    = var.project_id
+  collection = "sessions"
+  field      = "expires_at"
+  database   = google_firestore_database.chat.name
+  ttl_config {}
+}
+
+resource "google_firestore_field" "chat_runs_expires_at" {
+  project    = var.project_id
+  collection = "runs"
+  field      = "expires_at"
+  database   = google_firestore_database.chat.name
+  ttl_config {}
+}
+
+resource "google_firestore_field" "chat_events_expires_at" {
+  project    = var.project_id
+  collection = "events"
+  field      = "expires_at"
+  database   = google_firestore_database.chat.name
+  ttl_config {}
+}
+
+resource "google_firestore_index" "chat_runs_by_created" {
+  collection  = "runs"
+  # list_runs queries the runs collection nested under one session, not the
+  # collection group.  The generated Firestore error is otherwise misleading
+  # because both index types use the collectionGroups API path.
+  query_scope = "COLLECTION"
+  database    = google_firestore_database.chat.name
+  fields {
+    field_path = "created_at"
+    order      = "ASCENDING"
+  }
+  fields {
+    field_path = "id"
+    order      = "ASCENDING"
+  }
+  fields {
+    field_path = "__name__"
+    order      = "ASCENDING"
+  }
+}
+
 # JobRunner receives only a run ID, so it must resolve nested run documents
 # through a collection-group query without knowing the owning session first.
 resource "google_firestore_field" "chat_runs_by_id" {
@@ -165,6 +210,10 @@ resource "google_cloud_run_v2_job" "agent" {
         env {
           name  = "FIRESTORE_DATABASE"
           value = google_firestore_database.chat.name
+        }
+        env {
+          name  = "RUN_RETENTION_DAYS"
+          value = tostring(var.run_retention_days)
         }
       }
     }

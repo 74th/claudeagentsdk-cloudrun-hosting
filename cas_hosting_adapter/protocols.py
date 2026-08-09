@@ -1,4 +1,5 @@
 """Provider seams and deterministic in-memory fakes."""
+
 from __future__ import annotations
 
 import hashlib
@@ -14,8 +15,10 @@ from .models import (
     ChatEvent,
     ExecutionReference,
     ExecutionState,
+    InitialSessionResult,
     ReconciliationLease,
     Run,
+    RunPage,
     RunState,
     Session,
     SessionEvent,
@@ -56,8 +59,14 @@ class ChatStore(Protocol):
     """Durable chat state contract with transaction-level semantics."""
 
     def create_session(self, user_id: str, *, title: str = "") -> Session: ...
+    def reserve_initial_run(
+        self, session: Session, run: Run, event: ChatEvent
+    ) -> InitialSessionResult: ...
     def get_session(self, user_id: str, session_id: str) -> Session: ...
     def list_sessions(self, user_id: str, *, cursor: str | None, limit: int) -> SessionPage: ...
+    def list_runs(
+        self, user_id: str, session_id: str, *, cursor: str | None, limit: int
+    ) -> RunPage: ...
     def reserve_run(self, run: Run, event: ChatEvent) -> Run: ...
     def save_execution(self, run_id: UUID, execution: ExecutionReference) -> Run: ...
     def fail_dispatch(self, run_id: UUID, error_code: str) -> Run: ...
@@ -87,13 +96,15 @@ class WorkspaceStore(Protocol):
 
 
 class AgentFactory(Protocol):
-    async def run(self, *, prompt: str, workspace: Path, transcript_dir: Path,
-                  resume: str | None = None) -> str: ...
+    async def run(
+        self, *, prompt: str, workspace: Path, transcript_dir: Path, resume: str | None = None
+    ) -> str: ...
 
 
 class InMemoryClock:
     def __init__(self, current: datetime | None = None) -> None:
         self.current = current or datetime.now(UTC)
+
     def now(self) -> datetime:
         return self.current
 
@@ -101,8 +112,10 @@ class InMemoryClock:
 class InMemoryEvents:
     def __init__(self) -> None:
         self.events: dict[str, list[SessionEvent]] = {}
+
     def append(self, session_id: str, event: SessionEvent) -> None:
         self.events.setdefault(session_id, []).append(event)
+
     def list(self, session_id: str) -> list[SessionEvent]:
         return list(self.events.get(session_id, []))
 

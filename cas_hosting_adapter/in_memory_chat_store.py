@@ -1,6 +1,9 @@
 """Thread-safe in-memory ChatStore for contract and end-to-end tests."""
+
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from threading import Lock
@@ -11,8 +14,10 @@ from .errors import ActiveRunConflictError, SessionNotFoundError, SessionOwnersh
 from .models import (
     ChatEvent,
     ExecutionReference,
+    InitialSessionResult,
     ReconciliationLease,
     Run,
+    RunPage,
     RunState,
     Session,
     SessionPage,
@@ -32,9 +37,43 @@ class InMemoryChatStore:
     def create_session(self, user_id: str, *, title: str = "") -> Session:
         from uuid import uuid4
 
-        return self.put_session(Session(
-            id=str(uuid4()), user_id=user_id, workspace_id=str(uuid4()), title=title
-        ))
+        return self.put_session(
+            Session(id=str(uuid4()), user_id=user_id, workspace_id=str(uuid4()), title=title)
+        )
+
+    def reserve_initial_run(
+        self, session: Session, run: Run, event: ChatEvent
+    ) -> InitialSessionResult:
+        """Atomically reserve the draft session, first run, and user event."""
+        if (
+            session.user_id != run.user_id
+            or session.id != run.session_id
+            or session.workspace_id != run.workspace_id
+            or event.run_id != run.id
+        ):
+            raise ValueError("initial session, run, and event references do not match")
+        with self._lock:
+            existing_session = self.sessions.get(session.id)
+            if existing_session is not None:
+                if existing_session.user_id != session.user_id:
+                    raise SessionOwnershipError(session.id)
+                existing_runs = [
+                    candidate
+                    for candidate in self.runs.values()
+                    if candidate.session_id == session.id
+                    and candidate.idempotency_key == run.idempotency_key
+                ]
+                if existing_runs:
+                    return InitialSessionResult(session=existing_session, run=existing_runs[0])
+                if existing_session.active_run_id is not None:
+                    raise ActiveRunConflictError(str(existing_session.active_run_id))
+                session = existing_session
+            self.sessions[session.id] = session.model_copy(
+                update={"active_run_id": run.id, "latest_run_state": run.state.value}
+            )
+            self.runs[run.id] = run
+            self.events[run.id] = {event.id: event.model_copy(update={"sequence": 0})}
+            return InitialSessionResult(session=self.sessions[session.id], run=run)
 
     def list_sessions(self, user_id: str, *, cursor: str | None, limit: int) -> SessionPage:
         if limit < 1:
@@ -52,6 +91,33 @@ class InMemoryChatStore:
             sessions=page,
             next_cursor=page[-1].id if len(sessions) > limit and page else None,
         )
+
+    def list_runs(
+        self, user_id: str, session_id: str, *, cursor: str | None, limit: int
+    ) -> RunPage:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        self.get_session(user_id, session_id)
+        with self._lock:
+            runs = sorted(
+                (run for run in self.runs.values() if run.session_id == session_id),
+                key=lambda run: (run.created_at, str(run.id)),
+            )
+        if cursor is not None:
+            created_at, run_id = self._decode_run_cursor(cursor)
+            runs = [run for run in runs if (run.created_at, str(run.id)) > (created_at, run_id)]
+        page = runs[:limit]
+        next_cursor = None
+        if len(runs) > limit and page:
+            last = page[-1]
+            next_cursor = self._encode_run_cursor(last.created_at, str(last.id))
+        return RunPage(runs=page, next_cursor=next_cursor)
+
+    # Explicit alias for callers that want to emphasize the history use case.
+    def list_session_runs(
+        self, user_id: str, session_id: str, *, cursor: str | None, limit: int
+    ) -> RunPage:
+        return self.list_runs(user_id, session_id, cursor=cursor, limit=limit)
 
     def put_session(self, session: Session) -> Session:
         with self._lock:
@@ -80,7 +146,13 @@ class InMemoryChatStore:
                 raise ActiveRunConflictError(str(session.active_run_id))
             self.runs[run.id] = run
             self.events[run.id] = {event.id: event}
-            self.sessions[session.id] = session.model_copy(update={"active_run_id": run.id})
+            self.sessions[session.id] = session.model_copy(
+                update={
+                    "active_run_id": run.id,
+                    "latest_run_state": run.state.value,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
             return run
 
     def save_execution(self, run_id: UUID, execution: ExecutionReference) -> Run:
@@ -89,16 +161,24 @@ class InMemoryChatStore:
             state = RunState.PENDING if run.state is RunState.REQUESTED else run.state
             updated = run.model_copy(update={"execution": execution, "state": state})
             self.runs[run_id] = updated
+            session = self.sessions[run.session_id]
+            self.sessions[session.id] = session.model_copy(update={"updated_at": datetime.now(UTC)})
             return updated
 
     def fail_dispatch(self, run_id: UUID, error_code: str) -> Run:
         with self._lock:
-            run = self.runs[run_id].model_copy(update={
-                "state": RunState.DISPATCH_FAILED, "error_code": error_code
-            })
+            run = self.runs[run_id].model_copy(
+                update={"state": RunState.DISPATCH_FAILED, "error_code": error_code}
+            )
             self.runs[run_id] = run
             session = self.sessions[run.session_id]
-            self.sessions[session.id] = session.model_copy(update={"active_run_id": None})
+            self.sessions[session.id] = session.model_copy(
+                update={
+                    "active_run_id": None,
+                    "latest_run_state": run.state.value,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
             return run
 
     def claim_run(self, run_id: UUID, execution_identity: str) -> bool:
@@ -175,6 +255,8 @@ class InMemoryChatStore:
                 return run
             updated = run.model_copy(update={"state": RunState.CANCEL_REQUESTED})
             self.runs[run_id] = updated
+            session = self.sessions[run.session_id]
+            self.sessions[session.id] = session.model_copy(update={"updated_at": datetime.now(UTC)})
             return updated
 
     def commit_terminal(self, run: Run, execution_identity: str) -> Run:
@@ -200,16 +282,16 @@ class InMemoryChatStore:
                 and run.claude_session_id is not None
                 and run.snapshot is not None
             ):
-                session_update.update({
-                    "claude_session_id": run.claude_session_id,
-                    "snapshot": run.snapshot,
-                })
+                session_update.update(
+                    {
+                        "claude_session_id": run.claude_session_id,
+                        "snapshot": run.snapshot,
+                    }
+                )
             self.sessions[session.id] = session.model_copy(update=session_update)
             return run
 
-    def acquire_reconciliation_lease(
-        self, run_id: UUID, holder: str
-    ) -> ReconciliationLease | None:
+    def acquire_reconciliation_lease(self, run_id: UUID, holder: str) -> ReconciliationLease | None:
         now = datetime.now(UTC)
         with self._lock:
             current = self._leases.get(run_id)
@@ -231,5 +313,24 @@ class InMemoryChatStore:
             run = self.runs[run_id].model_copy(update={"state": state})
             self.runs[run_id] = run
             session = self.sessions[run.session_id]
-            self.sessions[session.id] = session.model_copy(update={"active_run_id": None})
+            self.sessions[session.id] = session.model_copy(
+                update={
+                    "active_run_id": None,
+                    "latest_run_state": state.value,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
             return run
+
+    @staticmethod
+    def _encode_run_cursor(created_at: datetime, run_id: str) -> str:
+        value = json.dumps([created_at.isoformat(), run_id]).encode("utf-8")
+        return base64.urlsafe_b64encode(value).decode("ascii")
+
+    @staticmethod
+    def _decode_run_cursor(cursor: str) -> tuple[datetime, str]:
+        try:
+            timestamp, run_id = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
+            return datetime.fromisoformat(timestamp).astimezone(UTC), str(run_id)
+        except (ValueError, TypeError, json.JSONDecodeError) as error:
+            raise ValueError("invalid run cursor") from error

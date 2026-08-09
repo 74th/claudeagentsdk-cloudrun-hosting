@@ -1,11 +1,26 @@
 """High-level control-plane API over provider-neutral ports."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from uuid import UUID
 
 from .errors import ExecutionTemporaryError
-from .models import ChatEvent, ExecutionState, Run, RunState, Session, SessionPage
+from .models import (
+    ChatEvent,
+    ExecutionState,
+    InitialSessionResult,
+    Run,
+    RunPage,
+    RunState,
+    Session,
+    SessionPage,
+    derive_run_id,
+    derive_session_id,
+    derive_workspace_id,
+    normalize_session_title,
+)
 from .protocols import ChatStore, ExecutionBackend
 
 
@@ -23,14 +38,73 @@ class ControlClient:
     def list_sessions(self, user_id: str, *, cursor: str | None, limit: int) -> SessionPage:
         return self._chat_store.list_sessions(user_id, cursor=cursor, limit=limit)
 
+    def start_session(
+        self, user_id: str, prompt: str, idempotency_key: str
+    ) -> InitialSessionResult:
+        """Reserve and dispatch a session whose first run contains ``prompt``."""
+        if not prompt.strip():
+            raise ValueError("prompt must not be blank")
+        now = datetime.now(UTC)
+        session = Session(
+            id=derive_session_id(user_id, idempotency_key),
+            user_id=user_id,
+            workspace_id=derive_workspace_id(user_id, idempotency_key),
+            title=normalize_session_title(prompt),
+            created_at=now,
+            updated_at=now,
+        )
+        run = Run(
+            id=derive_run_id(user_id, idempotency_key),
+            user_id=user_id,
+            session_id=session.id,
+            workspace_id=session.workspace_id,
+            idempotency_key=idempotency_key,
+            created_at=now,
+        )
+        event = ChatEvent(
+            id=f"user:{run.id}",
+            run_id=run.id,
+            sequence=0,
+            type="user",
+            occurred_at=now,
+            payload={"content": prompt},
+        )
+        reserved = self._chat_store.reserve_initial_run(session, run, event)
+        started = self._start_reserved(reserved.run, prompt)
+        return InitialSessionResult(
+            session=self._chat_store.get_session(user_id, session.id), run=started
+        )
+
+    # Keep a descriptive alias available to non-UI callers.
+    def start_initial_session(
+        self, user_id: str, prompt: str, idempotency_key: str
+    ) -> InitialSessionResult:
+        return self.start_session(user_id, prompt, idempotency_key)
+
+    def list_runs(
+        self, user_id: str, session_id: str, *, cursor: str | None, limit: int
+    ) -> RunPage:
+        return self._chat_store.list_runs(user_id, session_id, cursor=cursor, limit=limit)
+
+    def list_run_history(
+        self, user_id: str, session_id: str, *, cursor: str | None, limit: int
+    ) -> RunPage:
+        return self.list_runs(user_id, session_id, cursor=cursor, limit=limit)
+
     def reserve_and_start(self, run: Run, message: str) -> Run:
         reserved = self._chat_store.reserve_run(
             run,
             ChatEvent(
-                id=f"user:{run.id}", run_id=run.id, sequence=0, type="user",
+                id=f"user:{run.id}",
+                run_id=run.id,
+                sequence=0,
+                type="user",
                 payload={"content": message},
             ),
         )
+        return self._start_reserved(reserved, message)
+
+    def _start_reserved(self, reserved: Run, message: str) -> Run:
         if reserved.execution is not None:
             return reserved
         try:

@@ -1,4 +1,5 @@
 """Validated, secret-free release configuration."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -44,12 +45,16 @@ class ReleaseConfig(BaseModel):
 
     def terraform_variables(self) -> dict[str, object]:
         return {
-            "project_id": self.project_id, "region": self.region,
-            "firestore_database": self.firestore_database, "bucket_name": self.bucket_name,
-            "image": self.image, "job_name": self.job_name,
+            "project_id": self.project_id,
+            "region": self.region,
+            "firestore_database": self.firestore_database,
+            "bucket_name": self.bucket_name,
+            "image": self.image,
+            "job_name": self.job_name,
             "task_timeout_seconds": self.task_timeout_seconds,
             "snapshot_retention_days": self.snapshot_retention_days,
             "uncommitted_retention_days": self.uncommitted_retention_days,
+            "run_retention_days": self.run_retention_days,
             "vertex_region": self.vertex_region,
             "claude_model": self.claude_model,
             "log_level": self.log_level,
