@@ -7,3 +7,4 @@ job_name           = "test-claudesdk-cloudrun"
 vertex_region      = "us-east5"
 claude_model       = "claude-haiku-4-5@20251001"
 log_level          = "INFO"
+retention_days     = 30

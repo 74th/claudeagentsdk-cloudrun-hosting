@@ -30,14 +30,7 @@ resource "google_storage_bucket" "workspace" {
   uniform_bucket_level_access = true
   lifecycle_rule {
     action { type = "Delete" }
-    condition { age = var.snapshot_retention_days }
-  }
-  lifecycle_rule {
-    action { type = "Delete" }
-    condition {
-      age            = var.uncommitted_retention_days
-      matches_prefix = ["cas/v1/"]
-    }
+    condition { age = var.retention_days }
   }
 }
 
@@ -213,7 +206,7 @@ resource "google_cloud_run_v2_job" "agent" {
         }
         env {
           name  = "RUN_RETENTION_DAYS"
-          value = tostring(var.run_retention_days)
+          value = tostring(var.retention_days)
         }
       }
     }

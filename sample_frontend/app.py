@@ -212,7 +212,7 @@ def create_control_client_from_release_config(path: Path) -> ControlClient:
         firestore_database=release.firestore_database,
         bucket_name=release.bucket_name,
         job_name=release.job_name,
-        run_retention_days=release.run_retention_days,
+        retention_days=release.retention_days,
     )
     return create_google_cloud_control_client(settings)
 

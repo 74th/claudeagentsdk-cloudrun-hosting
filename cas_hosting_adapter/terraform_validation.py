@@ -11,7 +11,7 @@ def validate(path: Path) -> None:
         "google_firestore_index",
         "google_firestore_field",
         "ttl_config",
-        "run_retention_days",
+        "retention_days",
         "lifecycle_rule",
         "google_service_account",
         "FIRESTORE_DATABASE",
@@ -21,3 +21,16 @@ def validate(path: Path) -> None:
     missing = [value for value in required if value not in text]
     if missing:
         raise ValueError(f"missing Terraform safeguards: {', '.join(missing)}")
+    if any(
+        legacy in text
+        for legacy in (
+            "run_retention_days",
+            "snapshot_retention_days",
+            "uncommitted_retention_days",
+        )
+    ):
+        raise ValueError("Terraform must use only the shared retention_days variable")
+    if text.count("lifecycle_rule {") != 1 or "matches_prefix" in text:
+        raise ValueError("GCS must have one unscoped retention lifecycle rule")
+    if "condition { age = var.retention_days }" not in text:
+        raise ValueError("GCS lifecycle must use retention_days for every object")

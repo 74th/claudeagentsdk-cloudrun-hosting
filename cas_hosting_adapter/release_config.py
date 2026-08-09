@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Literal
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -11,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class ReleaseConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: str = "1"
+    schema_version: Literal["2"] = "2"
     project_id: str
     region: str
     firestore_location: str
@@ -21,12 +22,33 @@ class ReleaseConfig(BaseModel):
     job_name: str = "test-claudesdk-cloudrun"
     task_timeout_seconds: int = Field(default=1800, ge=1, le=86400)
     task_retries: int = Field(default=0, ge=0, le=0)
-    snapshot_retention_days: int = Field(default=30, ge=1)
-    uncommitted_retention_days: int = Field(default=1, ge=1)
-    run_retention_days: int = Field(default=30, ge=1)
+    retention_days: int = Field(default=30, ge=1)
     log_level: str = "INFO"
     vertex_region: str = "us-east5"
     claude_model: str = "claude-haiku-4-5@20251001"
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_retention_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            legacy = sorted(
+                {
+                    key
+                    for key in (
+                        "run_retention_days",
+                        "snapshot_retention_days",
+                        "uncommitted_retention_days",
+                    )
+                    if key in value
+                }
+            )
+            if legacy:
+                fields = ", ".join(legacy)
+                raise ValueError(
+                    f"legacy retention fields ({fields}) are unsupported; "
+                    "replace them with retention_days"
+                )
+        return value
 
     @model_validator(mode="after")
     def validate_locations(self) -> ReleaseConfig:
@@ -52,9 +74,7 @@ class ReleaseConfig(BaseModel):
             "image": self.image,
             "job_name": self.job_name,
             "task_timeout_seconds": self.task_timeout_seconds,
-            "snapshot_retention_days": self.snapshot_retention_days,
-            "uncommitted_retention_days": self.uncommitted_retention_days,
-            "run_retention_days": self.run_retention_days,
+            "retention_days": self.retention_days,
             "vertex_region": self.vertex_region,
             "claude_model": self.claude_model,
             "log_level": self.log_level,

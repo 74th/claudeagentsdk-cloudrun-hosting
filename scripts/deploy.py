@@ -17,6 +17,11 @@ def main() -> int:
     args = parser.parse_args()
     config = load_release_config(args.config)
     variables = config.terraform_variables()
+    print(
+        f"retention_days={config.retention_days}; "
+        "targets=Firestore sessions/runs/events and all GCS objects "
+        "(workspace/transcript/temporary); deletion=asynchronous"
+    )
     print(json.dumps(variables, sort_keys=True))
     with tempfile.NamedTemporaryFile(mode="w", suffix=".tfvars.json") as file:
         json.dump(variables, file)

@@ -48,6 +48,12 @@ async def run() -> int:
 
     project = os.environ["GOOGLE_CLOUD_PROJECT"]
     database = os.environ["FIRESTORE_DATABASE"]
+    try:
+        retention_days = int(os.environ.get("RUN_RETENTION_DAYS", "30"))
+    except ValueError as error:
+        raise ValueError("RUN_RETENTION_DAYS must be a positive integer") from error
+    if retention_days < 1:
+        raise ValueError("RUN_RETENTION_DAYS must be a positive integer")
     model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5@20251001")
     LOGGER.info(
         "job.start run_id=%s execution=%s project=%s database=%s model=%s",
@@ -57,7 +63,9 @@ async def run() -> int:
         database,
         model,
     )
-    store = FirestoreChatStore(Client(project=project, database=database))
+    store = FirestoreChatStore(
+        Client(project=project, database=database), retention_days=retention_days
+    )
     runner = JobRunner(store)
     runner.install_sigterm_handler()
     prompt = runner.prompt_for_run(invocation.run_id)

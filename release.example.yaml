@@ -1,4 +1,4 @@
-schema_version: "1"
+schema_version: "2"
 project_id: nnyn-dev
 region: us-central1
 firestore_location: us-central1
@@ -8,9 +8,7 @@ image: us-central1-docker.pkg.dev/nnyn-dev/claude-agent/agent@sha256:bc43bc07410
 job_name: test-claudesdk-cloudrun
 task_timeout_seconds: 1800
 task_retries: 0
-snapshot_retention_days: 30
-uncommitted_retention_days: 1
-run_retention_days: 30
+retention_days: 30
 log_level: INFO
 vertex_region: us-east5
 claude_model: claude-haiku-4-5@20251001

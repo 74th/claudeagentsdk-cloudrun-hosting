@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 
 from .errors import ActiveRunConflictError, SessionNotFoundError, SessionOwnershipError
 from .firestore_codec import (
+    DEFAULT_RETENTION_DAYS,
     decode_timestamp,
     encode_event,
     encode_run,
@@ -39,7 +40,7 @@ class FirestoreChatStore:
         *,
         collection: str = "users",
         clock: Clock | Callable[[], datetime] | None = None,
-        retention_days: int = 30,
+        retention_days: int = DEFAULT_RETENTION_DAYS,
     ) -> None:
         if retention_days < 1:
             raise ValueError("retention_days must be positive")

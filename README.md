@@ -45,7 +45,11 @@ DEBUG log は prompt や tool payload を出力しない運用にし、snapshot 
 
 ## Firestore TTL と legacy データの移行
 
-`run_retention_days` は session、run、event に共通する既定 30 日の保持期間です。Firestore TTL は期限到達後すぐに物理削除されるとは限らないため、アプリケーションの get/list/history も `expires_at` を検査します。Firestore の親削除は run と event の subcollection を連鎖削除しないため、3 つの collection group それぞれに TTL policy を設定しています。
+`retention_days` は Firestore の session、run、event と GCS の workspace、transcript、一時 object に共通する保持期間です。既定は 30 日で、release 設定から変更できます。`run_retention_days`、`snapshot_retention_days`、`uncommitted_retention_days` を使用している旧設定は schema version 2 では拒否されるため、単一の `retention_days` へ置き換えてください。
+
+Firestore TTL と GCS lifecycle は期限到達後の非同期削除です。期限を過ぎても物理削除まで時間がかかる場合があるため、アプリケーションの get/list/history は `expires_at` を検査します。Firestore の親削除は run と event の subcollection を連鎖削除しないため、3 つの collection group それぞれに TTL policy を設定しています。GCS は commit 状態や prefix によらず全 object に同じ lifecycle を適用します。
+
+期限到達後の削除を release の rollback で取り消したり、既に削除された Firestore document・GCS object を自動復旧したりすることはできません。適用前に export / plan を取得し、`python scripts/deploy.py release.example.yaml` の表示で Firestore と GCS の対象・共通日数を確認してください。
 
 既存文書の補完は、対象 project と名前付き database を明示した次の command で dry-run してから行います。
 

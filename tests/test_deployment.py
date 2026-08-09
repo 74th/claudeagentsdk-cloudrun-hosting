@@ -15,6 +15,11 @@ def test_terraform_has_required_deployment_safeguards() -> None:
     assert "FIRESTORE_DATABASE" in main_tf
     assert 'name        = var.firestore_database' in main_tf
     assert 'name        = "(default)"' not in main_tf
+    assert main_tf.count("lifecycle_rule {") == 1
+    assert "condition { age = var.retention_days }" in main_tf
+    assert "matches_prefix" not in main_tf
+    assert 'value = tostring(var.retention_days)' in main_tf
+    assert main_tf.count('field      = "expires_at"') == 3
 
 
 def test_release_config_rejects_unknown_and_unsafe_job_values() -> None:

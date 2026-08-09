@@ -39,20 +39,12 @@ variable "log_level" {
   type    = string
   default = "INFO"
 }
-variable "snapshot_retention_days" {
-  type    = number
-  default = 30
-}
-variable "uncommitted_retention_days" {
-  type    = number
-  default = 1
-}
-variable "run_retention_days" {
+variable "retention_days" {
   type        = number
-  description = "Shared Firestore session, run, and event retention in days."
+  description = "Shared Firestore and GCS retention in days."
   default     = 30
   validation {
-    condition     = var.run_retention_days >= 1
-    error_message = "run_retention_days must be at least one day."
+    condition     = var.retention_days >= 1
+    error_message = "retention_days must be at least one day."
   }
 }
