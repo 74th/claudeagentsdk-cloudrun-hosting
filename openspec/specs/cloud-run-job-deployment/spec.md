@@ -50,11 +50,19 @@ Terraform 構成は Cloud Run Job、Firestore database と必要な index、GCS 
 - **THEN** Firestore Native database `claude-agent-chat` と必要な index が作成され、`(default)` databaseはこの構成によって作成または変更されない
 
 ### Requirement: 保存データの保持期限を構成する
-デプロイ構成は snapshot と一時オブジェクトの lifecycle、および run・イベントの保持方針を設定可能にし、既定値を配備前に表示しなければならない（SHALL）。
+デプロイ構成は snapshot と一時オブジェクトの lifecycle、および Firestore のセッション、run、イベントの保持方針を設定可能にし、既定値を配備前に表示しなければならない（SHALL）。Firestore の既定保持期間は基準時刻から 30 日とし、名前付き database のセッション、run、イベント各 collection group に対して有効期限フィールドによる自動削除を構成しなければならない（SHALL）。
 
 #### Scenario: 既定保持期間で計画する
 - **WHEN** 利用者が保持期間を省略する
-- **THEN** システムは採用した既定値と削除対象を plan 前に表示する
+- **THEN** システムは 30 日の Firestore 保持期間、対象となるセッション・run・イベント、および snapshot と一時オブジェクトに採用した保持値を plan 前に表示する
+
+#### Scenario: Firestore TTLを計画する
+- **WHEN** 有効な名前付き Firestore database を指定して Terraform plan を作成する
+- **THEN** plan はその database のセッション、run、イベント各 collection group に同じ有効期限フィールドの TTL ポリシーを含む
+
+#### Scenario: 親セッションが先に削除される
+- **WHEN** TTL によりセッション親ドキュメントが run またはイベントより先に物理削除される
+- **THEN** run とイベントも各自の TTL ポリシーにより自動削除の対象であり、親削除だけに依存して無期限に残留しない
 
 ### Requirement: 秘密情報を成果物へ埋め込まない
 リリース設定、Terraform 変数、コンテナイメージ、ログへ API key、サービスアカウント鍵、アクセストークンを埋め込んではならない（MUST NOT）。
