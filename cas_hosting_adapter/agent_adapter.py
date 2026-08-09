@@ -104,34 +104,19 @@ class ClaudeAgentAdapter:
         name = type(message).__name__
         raw: list[tuple[str, dict[str, Any]]] = []
         if name == "UserMessage":
-            raw.append(("user", {"content": getattr(message, "content", "")}))
+            content = getattr(message, "content", "")
+            if isinstance(content, str):
+                raw.append(("user", {"content": content}))
+            else:
+                for block in content:
+                    normalised = self._normalise_content_block(block, text_type="user")
+                    if normalised is not None:
+                        raw.append(normalised)
         elif name == "AssistantMessage":
             for block in getattr(message, "content", []):
-                block_name = type(block).__name__
-                if block_name == "TextBlock":
-                    raw.append(("agent", {"content": getattr(block, "text", "")}))
-                elif block_name in {"ToolUseBlock", "ServerToolUseBlock"}:
-                    raw.append(
-                        (
-                            "tool_started",
-                            {
-                                "tool_id": getattr(block, "id", ""),
-                                "name": getattr(block, "name", ""),
-                                "input": getattr(block, "input", {}),
-                            },
-                        )
-                    )
-                elif block_name in {"ToolResultBlock", "ServerToolResultBlock"}:
-                    raw.append(
-                        (
-                            "tool_completed",
-                            {
-                                "tool_id": getattr(block, "tool_use_id", ""),
-                                "content": getattr(block, "content", None),
-                                "is_error": bool(getattr(block, "is_error", False)),
-                            },
-                        )
-                    )
+                normalised = self._normalise_content_block(block, text_type="agent")
+                if normalised is not None:
+                    raw.append(normalised)
             if getattr(message, "error", None):
                 raw.append(("error", {"code": message.error}))
         elif name in {"TaskProgressMessage", "TaskStartedMessage", "TaskUpdatedMessage"}:
@@ -163,6 +148,28 @@ class ClaudeAgentAdapter:
             }
             for part, (event_type, payload) in enumerate(raw)
         ]
+
+    @staticmethod
+    def _normalise_content_block(
+        block: Any, *, text_type: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Map SDK content blocks to the durable event vocabulary."""
+        block_name = type(block).__name__
+        if block_name == "TextBlock":
+            return text_type, {"content": getattr(block, "text", "")}
+        if block_name in {"ToolUseBlock", "ServerToolUseBlock"}:
+            return "tool_started", {
+                "tool_id": getattr(block, "id", ""),
+                "name": getattr(block, "name", ""),
+                "input": getattr(block, "input", {}),
+            }
+        if block_name in {"ToolResultBlock", "ServerToolResultBlock"}:
+            return "tool_completed", {
+                "tool_id": getattr(block, "tool_use_id", ""),
+                "content": getattr(block, "content", None),
+                "is_error": bool(getattr(block, "is_error", False)),
+            }
+        return None
 
     async def events(
         self, *, prompt: str, workspace: Path, transcript_dir: Path, resume: str | None = None

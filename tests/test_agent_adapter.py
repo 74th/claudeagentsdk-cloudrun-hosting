@@ -124,3 +124,27 @@ def test_sdk_messages_are_normalised_with_stable_event_ids() -> None:
         ("agent", "sdk:message-1:0"),
         ("tool_started", "sdk:message-1:1"),
     ]
+
+
+def test_user_tool_result_messages_are_not_stored_as_user_events() -> None:
+    class ToolResultBlock:
+        tool_use_id = "tool-1"
+        content = [{"type": "text", "text": "result"}]
+        is_error = False
+
+    class UserMessage:
+        uuid = "message-2"
+        content = [ToolResultBlock()]
+
+    events = ClaudeAgentAdapter(model="test-model")._normalise_message(UserMessage(), position=4)
+
+    assert [(event["event_type"], event["payload"]) for event in events] == [
+        (
+            "tool_completed",
+            {
+                "tool_id": "tool-1",
+                "content": [{"type": "text", "text": "result"}],
+                "is_error": False,
+            },
+        )
+    ]

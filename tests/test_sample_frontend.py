@@ -1,6 +1,7 @@
 from cas_hosting_adapter.control_client import ControlClient
 from cas_hosting_adapter.factory import GoogleCloudSettings
 from cas_hosting_adapter.in_memory_chat_store import InMemoryChatStore
+from cas_hosting_adapter.models import ChatEvent
 from cas_hosting_adapter.protocols import InMemoryExecutionBackend
 from sample_frontend.app import (
     DRAFT_STATE_KEY,
@@ -8,6 +9,7 @@ from sample_frontend.app import (
     ChatViewModel,
     ManualIdentity,
     create_view_from_release_config,
+    order_sessions,
     session_label,
 )
 
@@ -18,7 +20,7 @@ def test_manual_identity_is_replaceable_boundary() -> None:
     assert DRAFT_STATE_KEY == "session-draft"
 
 
-def test_session_label_uses_utc_time_and_legacy_title_fallback() -> None:
+def test_session_label_uses_jst_time_and_legacy_title_fallback() -> None:
     from datetime import UTC, datetime
 
     from cas_hosting_adapter.models import Session
@@ -29,7 +31,29 @@ def test_session_label_uses_utc_time_and_legacy_title_fallback() -> None:
         workspace_id="workspace",
         updated_at=datetime(2026, 8, 9, 1, 2, 3, tzinfo=UTC),
     )
-    assert session_label(session) == "2026-08-09 01:02:03 UTC · Untitled session"
+    assert session_label(session) == "2026-08-09 10:02:03 JST · Untitled session"
+
+
+def test_order_sessions_returns_newest_updated_session_first() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from cas_hosting_adapter.models import Session
+
+    now = datetime(2026, 8, 9, 1, 2, 3, tzinfo=UTC)
+    older = Session(
+        id="older",
+        user_id="user",
+        workspace_id="workspace-older",
+        updated_at=now - timedelta(minutes=1),
+    )
+    newer = Session(
+        id="newer",
+        user_id="user",
+        workspace_id="workspace-newer",
+        updated_at=now,
+    )
+
+    assert [session.id for session in order_sessions([older, newer])] == ["newer", "older"]
 
 
 def test_view_model_creates_session_and_starts_run() -> None:
@@ -45,6 +69,71 @@ def test_view_model_creates_session_and_starts_run() -> None:
     unsubscribe()
     assert received == [f"user:{run.id}"]
     assert [event.id for event in view.events(run.id)] == [f"user:{run.id}"]
+
+
+def test_history_does_not_render_streamed_answer_again_as_final_result() -> None:
+    store = InMemoryChatStore()
+    view = ChatViewModel(ControlClient(store, InMemoryExecutionBackend()), ManualIdentity("user"))
+    session = view.create_session()
+    run = view.start(session, "summarize this", "key")
+    answer = "GitHub プロフィール要約: 74th (Atsushi Morimoto)"
+    store.append_event(
+        ChatEvent(
+            id="agent-answer",
+            run_id=run.id,
+            sequence=0,
+            type="agent",
+            payload={"content": answer},
+        )
+    )
+    store.append_event(
+        ChatEvent(
+            id="final-answer",
+            run_id=run.id,
+            sequence=0,
+            type="final",
+            payload={"output": answer},
+        )
+    )
+
+    assert [(event.type, event.payload) for event in view.history(session.id)] == [
+        ("user", {"content": "summarize this"}),
+        ("final", {"output": answer}),
+    ]
+
+
+def test_history_reclassifies_legacy_tool_result_stored_as_user_event() -> None:
+    from uuid import uuid4
+
+    run_id = uuid4()
+    legacy = ChatEvent(
+        id="sdk:legacy-tool-result",
+        run_id=run_id,
+        sequence=0,
+        type="user",
+        payload={
+            "content": [
+                {
+                    "tool_use_id": "tool-1",
+                    "content": [{"type": "text", "text": "result"}],
+                    "is_error": None,
+                }
+            ]
+        },
+    )
+
+    converted = ChatViewModel._normalise_legacy_events([legacy])
+
+    assert [(event.type, event.payload) for event in converted] == [
+        (
+            "tool_completed",
+            {
+                "tool_id": "tool-1",
+                "content": [{"type": "text", "text": "result"}],
+                "is_error": False,
+            },
+        )
+    ]
 
 
 def test_release_config_builds_the_google_cloud_settings(monkeypatch, tmp_path) -> None:

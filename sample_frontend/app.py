@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC
 from pathlib import Path
 from time import sleep
 from typing import Protocol
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from cas_hosting_adapter.control_client import ControlClient
 from cas_hosting_adapter.factory import GoogleCloudSettings, create_google_cloud_control_client
@@ -41,7 +41,12 @@ class ChatViewModel:
         self._identity = identity
 
     def sessions(self, cursor: str | None = None) -> SessionPage:
-        return self._client.list_sessions(self._identity.user_id(), cursor=cursor, limit=20)
+        page = self._client.list_sessions(self._identity.user_id(), cursor=cursor, limit=20)
+        return page.model_copy(
+            update={
+                "sessions": order_sessions(page.sessions),
+            }
+        )
 
     def create_session(self, title: str = "") -> Session:
         return self._client.create_session(self._identity.user_id(), title=title)
@@ -81,11 +86,89 @@ class ChatViewModel:
     def events_for_session(self, session_id: str) -> list[ChatEvent]:
         events: list[ChatEvent] = []
         for run in self.runs(session_id):
-            events.extend(self.events(run.id))
+            events.extend(self._normalise_legacy_events(self.events(run.id)))
         return events
 
+    @staticmethod
+    def _normalise_legacy_events(events: list[ChatEvent]) -> list[ChatEvent]:
+        """Render old SDK tool-result events that were incorrectly stored as user events."""
+        normalised: list[ChatEvent] = []
+        for event in events:
+            if event.type != "user" or not isinstance(event.payload.get("content"), list):
+                normalised.append(event)
+                continue
+            blocks = event.payload["content"]
+            converted: list[ChatEvent] = []
+            for index, block in enumerate(blocks):
+                if not isinstance(block, dict):
+                    continue
+                if "tool_use_id" in block:
+                    converted.append(
+                        event.model_copy(
+                            update={
+                                "id": f"{event.id}:tool-result:{index}",
+                                "type": "tool_completed",
+                                "payload": {
+                                    "tool_id": block.get("tool_use_id", ""),
+                                    "content": block.get("content"),
+                                    "is_error": bool(block.get("is_error", False)),
+                                },
+                            }
+                        )
+                    )
+                elif "name" in block and "input" in block:
+                    converted.append(
+                        event.model_copy(
+                            update={
+                                "id": f"{event.id}:tool-use:{index}",
+                                "type": "tool_started",
+                                "payload": {
+                                    "tool_id": block.get("id", ""),
+                                    "name": block.get("name", "ツール"),
+                                    "input": block.get("input", {}),
+                                },
+                            }
+                        )
+                    )
+            normalised.extend(converted or [event])
+        return normalised
+
     def history(self, session_id: str) -> list[ChatEvent]:
-        return self.events_for_session(session_id)
+        """Return displayable history without rendering a terminal answer twice.
+
+        Claude Agent SDK emits the assistant text while it is streaming and
+        emits the complete result again as a final event.  Keep the streaming
+        event for active runs, but once a matching final event exists prefer
+        that canonical terminal result.  The filtering is scoped to each run
+        so identical answers in separate runs remain visible.
+        """
+        events = self.events_for_session(session_id)
+        final_outputs_by_run: dict[UUID, set[str]] = {}
+        for event in events:
+            if event.type != "final":
+                continue
+            output = event.payload.get("output")
+            if isinstance(output, str):
+                final_outputs_by_run.setdefault(event.run_id, set()).add(output.strip())
+
+        displayed: list[ChatEvent] = []
+        seen_final_outputs: set[tuple[UUID, str]] = set()
+        for event in events:
+            if event.type == "agent":
+                content = event.payload.get("content")
+                if isinstance(content, str) and content.strip() in final_outputs_by_run.get(
+                    event.run_id, set()
+                ):
+                    continue
+            elif event.type == "final":
+                output = event.payload.get("output")
+                if isinstance(output, str):
+                    key = (event.run_id, output.strip())
+                    if key in seen_final_outputs:
+                        continue
+                    seen_final_outputs.add(key)
+            displayed.append(event)
+        return displayed
 
     def subscribe(self, run_id: UUID, callback: Callable[[ChatEvent], None]) -> Callable[[], None]:
         return self._client.subscribe_from_cursor(run_id, None, callback)
@@ -100,13 +183,19 @@ class ChatViewModel:
 SELECTED_SESSION_KEY = "selected-session-id"
 DRAFT_STATE_KEY = "session-draft"
 DRAFT_IDEMPOTENCY_KEY = "draft-idempotency-key"
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def order_sessions(sessions: list[Session]) -> list[Session]:
+    """Keep the sidebar order newest-first, independent of provider ordering."""
+    return sorted(sessions, key=lambda session: (session.updated_at, session.id), reverse=True)
 
 
 def session_label(session: Session) -> str:
-    """Render the server-sorted session item without exposing IDs as titles."""
-    updated = session.updated_at.astimezone(UTC)
+    """Render a session item with its last-update time in Japan Standard Time."""
+    updated = session.updated_at.astimezone(JST)
     title = session.title.strip() or "Untitled session"
-    return f"{updated:%Y-%m-%d %H:%M:%S UTC} · {title}"
+    return f"{updated:%Y-%m-%d %H:%M:%S JST} · {title}"
 
 
 def create_control_client_from_release_config(path: Path) -> ControlClient:
@@ -152,10 +241,13 @@ def render(identity: IdentityProvider, view: ChatViewModel | None = None) -> Non
     if not page.sessions:
         st.sidebar.caption("保存済みセッションはありません。")
     for session in page.sessions:
+        if session.id == selected_id:
+            st.sidebar.info(session_label(session))
+            continue
         if st.sidebar.button(
             session_label(session),
             key=f"select-session:{session.id}",
-            type="primary" if session.id == selected_id else "secondary",
+            type="secondary",
             use_container_width=True,
         ):
             st.session_state[SELECTED_SESSION_KEY] = session.id
@@ -206,10 +298,11 @@ def render(identity: IdentityProvider, view: ChatViewModel | None = None) -> Non
                 st.write(event.payload.get("content") or event.payload.get("output") or "")
         elif event.type == "tool_started":
             name = event.payload.get("name") or "ツール"
-            with st.status(f"実行中: {name}"):
+            with st.status(f"実行中: {name}", expanded=False):
                 st.json(event.payload.get("input", {}))
         elif event.type == "tool_completed":
-            st.caption("ツール完了")
+            with st.status("ツール完了", state="complete", expanded=False):
+                st.json(event.payload)
         elif event.type == "progress" and event.payload.get("description"):
             st.caption(f"進捗: {event.payload['description']}")
     if current_run is not None and selected.active_run_id == current_run.id:
