@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
-from .errors import ExecutionTemporaryError
+from .errors import ExecutionNotFoundError, ExecutionTemporaryError
 from .models import (
     ChatEvent,
     ExecutionState,
@@ -166,7 +166,20 @@ class ControlClient:
         lease = self._chat_store.acquire_reconciliation_lease(run_id, holder)
         if lease is None:
             return run
-        status = self._execution_backend.get(run.execution)
+        try:
+            status = self._execution_backend.get(run.execution)
+        except ExecutionTemporaryError:
+            self._chat_store.release_reconciliation_lease(run_id, holder)
+            return run
+        except ExecutionNotFoundError:
+            result = self._chat_store.reconcile_terminal(
+                run_id, holder, RunState.FAILED, error_code="cloud_run_execution_not_found"
+            )
+            self._chat_store.release_reconciliation_lease(run_id, holder)
+            return result
+        except Exception:
+            self._chat_store.release_reconciliation_lease(run_id, holder)
+            raise
         target = {
             ExecutionState.CANCELLED: RunState.CANCELLED,
             ExecutionState.FAILED: RunState.FAILED,
@@ -176,5 +189,13 @@ class ControlClient:
             has_final = any(event.type == "final" for event in events)
             target = RunState.PERSISTENCE_FAILED if run.snapshot is None or not has_final else None
         if target is None:
+            self._chat_store.release_reconciliation_lease(run_id, holder)
             return run
-        return self._chat_store.reconcile_terminal(run_id, holder, target)
+        error_code = {
+            RunState.FAILED: "cloud_run_execution_failed",
+            RunState.CANCELLED: "cloud_run_execution_cancelled",
+            RunState.PERSISTENCE_FAILED: "persistence_failed",
+        }[target]
+        result = self._chat_store.reconcile_terminal(run_id, holder, target, error_code=error_code)
+        self._chat_store.release_reconciliation_lease(run_id, holder)
+        return result

@@ -303,14 +303,25 @@ class InMemoryChatStore:
             self._leases[run_id] = lease
             return lease
 
-    def reconcile_terminal(self, run_id: UUID, holder: str, state: RunState) -> Run:
+    def reconcile_terminal(
+        self, run_id: UUID, holder: str, state: RunState, *, error_code: str | None = None
+    ) -> Run:
         if not state.terminal:
             raise ValueError("terminal state is required")
         with self._lock:
             lease = self._leases.get(run_id)
             if lease is None or lease.holder != holder:
                 raise SessionOwnershipError(str(run_id))
-            run = self.runs[run_id].model_copy(update={"state": state})
+            current = self.runs[run_id]
+            if current.state.terminal:
+                return current
+            run = current.model_copy(
+                update={
+                    "state": state,
+                    "error_code": error_code,
+                    "finished_at": datetime.now(UTC),
+                }
+            )
             self.runs[run_id] = run
             session = self.sessions[run.session_id]
             self.sessions[session.id] = session.model_copy(
@@ -321,6 +332,12 @@ class InMemoryChatStore:
                 }
             )
             return run
+
+    def release_reconciliation_lease(self, run_id: UUID, holder: str) -> None:
+        with self._lock:
+            lease = self._leases.get(run_id)
+            if lease is not None and lease.holder == holder:
+                del self._leases[run_id]
 
     @staticmethod
     def _encode_run_cursor(created_at: datetime, run_id: str) -> str:

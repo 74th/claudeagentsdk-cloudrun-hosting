@@ -1,6 +1,9 @@
+from uuid import uuid4
+
 import pytest
 
 from cas_hosting_adapter.control_client import ControlClient
+from cas_hosting_adapter.errors import ExecutionNotFoundError, ExecutionTemporaryError
 from cas_hosting_adapter.in_memory_chat_store import InMemoryChatStore
 from cas_hosting_adapter.models import ChatEvent, ExecutionReference, ExecutionState, Run, RunState
 from cas_hosting_adapter.protocols import InMemoryExecutionBackend
@@ -139,6 +142,69 @@ def test_reconcile_marks_success_without_snapshot_as_persistence_failure() -> No
     assert run.execution is not None
     backend.set_state(run.execution, ExecutionState.SUCCEEDED)
     assert client.reconcile(run.id, holder="reconciler").state is RunState.PERSISTENCE_FAILED
+
+
+def test_reconcile_keeps_active_run_on_temporary_status_error() -> None:
+    class TemporaryBackend(InMemoryExecutionBackend):
+        def get(self, reference):
+            raise ExecutionTemporaryError("unavailable")
+
+    store = InMemoryChatStore()
+    client = ControlClient(store, TemporaryBackend())
+    session = client.create_session("user")
+    run = client.reserve_and_start(
+        Run(
+            user_id="user",
+            session_id=session.id,
+            workspace_id=session.workspace_id,
+            idempotency_key="key",
+        ),
+        "hello",
+    )
+    assert client.reconcile(run.id, holder="reconciler").state is RunState.PENDING
+    assert store.get_session("user", session.id).active_run_id == run.id
+
+
+def test_reconcile_marks_missing_execution_with_safe_error_code_idempotently() -> None:
+    class MissingBackend(InMemoryExecutionBackend):
+        def get(self, reference):
+            raise ExecutionNotFoundError("provider detail must not persist")
+
+    store = InMemoryChatStore()
+    client = ControlClient(store, MissingBackend())
+    session = client.create_session("user")
+    run = client.reserve_and_start(
+        Run(
+            user_id="user",
+            session_id=session.id,
+            workspace_id=session.workspace_id,
+            idempotency_key="key",
+        ),
+        "hello",
+    )
+    first = client.reconcile(run.id, holder="reconciler")
+    second = client.reconcile(run.id, holder="reconciler-2")
+    assert (first.state, first.error_code) == (RunState.FAILED, "cloud_run_execution_not_found")
+    assert second == first
+    assert store.get_session("user", session.id).active_run_id is None
+
+
+def test_reconcile_leaves_run_unchanged_when_execution_reference_is_missing() -> None:
+    store = InMemoryChatStore()
+    client = ControlClient(store, InMemoryExecutionBackend())
+    session = client.create_session("user")
+    run_id = uuid4()
+    run = store.reserve_run(
+        Run(
+            id=run_id,
+            user_id="user",
+            session_id=session.id,
+            workspace_id=session.workspace_id,
+            idempotency_key="key",
+        ),
+        ChatEvent(id="user", run_id=run_id, sequence=0, type="user"),
+    )
+    assert client.reconcile(run.id, holder="reconciler") == run
 
 
 def test_cancel_commits_only_after_backend_confirms_cancelled() -> None:

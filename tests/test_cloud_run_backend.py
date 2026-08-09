@@ -7,7 +7,12 @@ from cas_hosting_adapter.cloud_run_backend import (
     _map_execution_error,
     normalize_execution_conditions,
 )
-from cas_hosting_adapter.errors import ExecutionNotFoundError, ExecutionPermissionError
+from cas_hosting_adapter.errors import (
+    ExecutionNotFoundError,
+    ExecutionPermissionError,
+    ExecutionQuotaError,
+    ExecutionTemporaryError,
+)
 from cas_hosting_adapter.models import ExecutionReference, ExecutionState
 
 
@@ -67,6 +72,22 @@ class FakeAsyncJobs:
         )
 
 
+class FakeOperationExecutions:
+    def list_executions(self, *, parent: str) -> list[SimpleNamespace]:
+        assert parent.endswith("/jobs/job")
+        return [
+            SimpleNamespace(
+                name="projects/project/locations/us-central1/jobs/job/executions/execution-1",
+                annotations={},
+                template=SimpleNamespace(
+                    containers=[
+                        SimpleNamespace(env=[SimpleNamespace(name="RUN_ID", value="RUN_ID")])
+                    ]
+                ),
+            )
+        ]
+
+
 def test_cancel_is_idempotent_for_terminal_execution() -> None:
     terminal = FakeExecutions([condition("Completed", "CONDITION_SUCCEEDED")])
     backend = CloudRunJobsBackend(
@@ -82,6 +103,13 @@ def test_cloud_run_errors_are_normalized() -> None:
     assert isinstance(not_found, ExecutionNotFoundError)
     assert isinstance(
         _map_execution_error(RuntimeError("permission denied"), "get"), ExecutionPermissionError
+    )
+    assert isinstance(
+        _map_execution_error(RuntimeError("quota exhausted"), "get"), ExecutionQuotaError
+    )
+    assert _map_execution_error(RuntimeError("deadline exceeded"), "get").retryable
+    assert isinstance(
+        _map_execution_error(RuntimeError("network reset"), "get"), ExecutionTemporaryError
     )
 
 
@@ -109,6 +137,12 @@ def test_timeout_condition_is_a_failed_execution() -> None:
     assert state is ExecutionState.FAILED
 
 
+def test_enum_reason_is_normalized_without_exposing_the_sdk_type() -> None:
+    failed = condition("Completed", "CONDITION_FAILED", "")
+    failed.reason = SimpleNamespace(name="COMMON_REASON_UNDEFINED")
+    assert normalize_execution_conditions([failed]) is ExecutionState.FAILED
+
+
 def test_start_uses_execution_name_from_run_operation_metadata() -> None:
     run_id = uuid4()
     target = "projects/project/locations/us-central1/jobs/job/executions/execution-1"
@@ -127,3 +161,30 @@ def test_start_returns_operation_reference_without_waiting_for_job_completion() 
 
     assert reference.name.endswith("/operations/operation-1")
     assert backend.get(reference) is ExecutionState.PENDING
+
+
+def test_start_resolves_operation_to_cancellable_execution() -> None:
+    backend = CloudRunJobsBackend(
+        FakeAsyncJobs(),
+        FakeOperationExecutions(),
+        project="project",
+        region="us-central1",
+        job_name="job",
+    )
+    run_id = uuid4()
+    backend._executions = SimpleNamespace(
+        list_executions=lambda *, parent: [
+            SimpleNamespace(
+                name="projects/project/locations/us-central1/jobs/job/executions/execution-1",
+                annotations={},
+                template=SimpleNamespace(
+                    containers=[
+                        SimpleNamespace(
+                            env=[SimpleNamespace(name="RUN_ID", value=str(run_id))]
+                        )
+                    ]
+                ),
+            )
+        ]
+    )
+    assert backend.start(run_id).name.endswith("/executions/execution-1")

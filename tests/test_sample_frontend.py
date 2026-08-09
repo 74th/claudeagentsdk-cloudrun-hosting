@@ -1,7 +1,8 @@
 from cas_hosting_adapter.control_client import ControlClient
+from cas_hosting_adapter.errors import ExecutionTemporaryError
 from cas_hosting_adapter.factory import GoogleCloudSettings
 from cas_hosting_adapter.in_memory_chat_store import InMemoryChatStore
-from cas_hosting_adapter.models import ChatEvent
+from cas_hosting_adapter.models import ChatEvent, ExecutionState, RunState
 from cas_hosting_adapter.protocols import InMemoryExecutionBackend
 from sample_frontend.app import (
     DRAFT_STATE_KEY,
@@ -69,6 +70,34 @@ def test_view_model_creates_session_and_starts_run() -> None:
     unsubscribe()
     assert received == [f"user:{run.id}"]
     assert [event.id for event in view.events(run.id)] == [f"user:{run.id}"]
+
+
+def test_view_model_reconciles_active_run_without_provider_dependency() -> None:
+    store = InMemoryChatStore()
+    backend = InMemoryExecutionBackend()
+    view = ChatViewModel(ControlClient(store, backend), ManualIdentity("user"))
+    session = view.create_session()
+    run = view.start(session, "hello", "key")
+    assert run.execution is not None
+    backend.set_state(run.execution, ExecutionState.FAILED)
+    reconciled = view.reconcile(run.id)
+    assert (reconciled.state, reconciled.error_code) == (
+        RunState.FAILED,
+        "cloud_run_execution_failed",
+    )
+
+
+def test_view_model_reconcile_preserves_active_run_after_temporary_error() -> None:
+    class TemporaryBackend(InMemoryExecutionBackend):
+        def get(self, reference):
+            raise ExecutionTemporaryError("temporary")
+
+    store = InMemoryChatStore()
+    view = ChatViewModel(ControlClient(store, TemporaryBackend()), ManualIdentity("user"))
+    session = view.create_session()
+    run = view.start(session, "hello", "key")
+    assert view.reconcile(run.id).state is RunState.PENDING
+    assert view.session(session.id).active_run_id == run.id
 
 
 def test_history_does_not_render_streamed_answer_again_as_final_result() -> None:

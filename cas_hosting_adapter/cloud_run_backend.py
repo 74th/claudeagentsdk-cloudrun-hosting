@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from time import sleep
 from typing import Any
 from uuid import UUID
 
@@ -49,9 +50,16 @@ class CloudRunJobsBackend:
                 )
             operation_name = getattr(getattr(operation, "operation", None), "name", "")
             if isinstance(operation_name, str) and "/operations/" in operation_name:
-                # RunJob's LRO completes only after the task has ended.  Keep
-                # that operation as the opaque execution reference instead of
-                # blocking the UI until Claude has produced its final answer.
+                execution = self._find_execution_for_operation(operation_name, run_id)
+                if execution is not None:
+                    return ExecutionReference(
+                        backend="cloud-run-jobs", name=execution, identity=str(run_id)
+                    )
+                # Test doubles and older clients may not support listing
+                # executions. Keep the LRO reference as a compatibility
+                # fallback, but production clients resolve it above because
+                # generic long-running-operation cancellation is unsupported
+                # by the Cloud Run API.
                 return ExecutionReference(
                     backend="cloud-run-jobs", name=operation_name, identity=str(run_id)
                 )
@@ -61,6 +69,32 @@ class CloudRunJobsBackend:
             )
         except Exception as error:
             raise _map_execution_error(error, "Cloud Run Job start failed") from error
+
+    def _find_execution_for_operation(self, operation_name: str, run_id: UUID) -> str | None:
+        """Resolve RunJob's LRO to its cancellable Cloud Run Execution."""
+        list_executions = getattr(self._executions, "list_executions", None)
+        if not callable(list_executions):
+            return None
+        operation_id = operation_name.rsplit("/", 1)[-1]
+        for _ in range(10):
+            try:
+                for execution in list_executions(parent=self._job):
+                    annotations = getattr(execution, "annotations", {}) or {}
+                    containers = getattr(getattr(execution, "template", None), "containers", ())
+                    has_run_id = any(
+                        env.name == "RUN_ID" and env.value == str(run_id)
+                        for container in containers
+                        for env in getattr(container, "env", ())
+                    )
+                    matches_operation = (
+                        annotations.get("run.googleapis.com/operation-id") == operation_id
+                    )
+                    if matches_operation or has_run_id:
+                        return str(execution.name)
+            except Exception as error:
+                raise _map_execution_error(error, "Cloud Run Execution list failed") from error
+            sleep(0.2)
+        return None
 
     def dispatch_once(
         self,
@@ -118,7 +152,8 @@ def normalize_execution_conditions(conditions: Any) -> ExecutionState:
         if state == "CONDITION_SUCCEEDED":
             return ExecutionState.SUCCEEDED
         if state == "CONDITION_FAILED":
-            if "cancel" in completed.reason.lower():
+            reason = getattr(completed.reason, "name", str(completed.reason)).lower()
+            if "cancel" in reason:
                 return ExecutionState.CANCELLED
             return ExecutionState.FAILED
     started = by_type.get("Started")

@@ -578,36 +578,55 @@ class FirestoreChatStore:
 
         return cast(ReconciliationLease | None, transactional(acquire)(transaction))
 
-    def reconcile_terminal(self, run_id: UUID, holder: str, state: RunState) -> Run:
+    def reconcile_terminal(
+        self, run_id: UUID, holder: str, state: RunState, *, error_code: str | None = None
+    ) -> Run:
+        from google.cloud.firestore import transactional
+
         if not state.terminal:
             raise ValueError("terminal state is required")
         lease = self.acquire_reconciliation_lease(run_id, holder)
         if lease is None:
             raise SessionOwnershipError("reconciliation lease is not held")
-        run = self.get_run_for_job(run_id).model_copy(update={"state": state})
         query = self._client.collection_group("runs").where("id", "==", str(run_id)).limit(1)
         found = list(query.stream())
         ref = found[0].reference
-        now = self._now()
-        ref.update(
-            {
-                "state": state.value,
-                "finished_at": now,
-                "expires_at": now + timedelta(days=self._retention_days),
-            }
-        )
-        ref.parent.parent.update(
-            {
-                "active_run_id": None,
-                "latest_run_state": state.value,
-                "updated_at": now,
-                "expires_at": now + timedelta(days=self._retention_days),
-            }
-        )
-        return run
+        session_ref = ref.parent.parent
+        transaction = self._client.transaction()
 
-    def release_reconciliation_lease(self, run_id: str, holder: str) -> None:
-        query = self._client.collection_group("runs").where("id", "==", run_id).limit(1)
+        def commit(transaction: Any) -> Run:
+            snapshot = ref.get(transaction=transaction)
+            current = self._decode_run(dict(snapshot.to_dict()))
+            if current.state.terminal:
+                return current
+            now = self._now()
+            run = current.model_copy(
+                update={"state": state, "error_code": error_code, "finished_at": now}
+            )
+            transaction.update(
+                ref,
+                {
+                    "state": state.value,
+                    "error_code": error_code,
+                    "finished_at": now,
+                    "expires_at": now + timedelta(days=self._retention_days),
+                },
+            )
+            transaction.update(
+                session_ref,
+                {
+                    "active_run_id": None,
+                    "latest_run_state": state.value,
+                    "updated_at": now,
+                    "expires_at": now + timedelta(days=self._retention_days),
+                },
+            )
+            return run
+
+        return cast(Run, transactional(commit)(transaction))
+
+    def release_reconciliation_lease(self, run_id: UUID, holder: str) -> None:
+        query = self._client.collection_group("runs").where("id", "==", str(run_id)).limit(1)
         found = list(query.stream())
         if not found:
             raise SessionNotFoundError("run was not found")

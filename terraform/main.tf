@@ -117,7 +117,7 @@ resource "google_firestore_field" "chat_events_expires_at" {
 }
 
 resource "google_firestore_index" "chat_runs_by_created" {
-  collection  = "runs"
+  collection = "runs"
   # list_runs queries the runs collection nested under one session, not the
   # collection group.  The generated Firestore error is otherwise misleading
   # because both index types use the collectionGroups API path.

@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from cas_hosting_adapter.control_client import ControlClient
+from cas_hosting_adapter.errors import ExecutionTemporaryError
 from cas_hosting_adapter.factory import GoogleCloudSettings, create_google_cloud_control_client
 from cas_hosting_adapter.models import (
     ChatEvent,
@@ -179,6 +180,10 @@ class ChatViewModel:
     def cancel(self, run_id: UUID) -> Run:
         return self._client.cancel(run_id)
 
+    def reconcile(self, run_id: UUID) -> Run:
+        """Refresh one active run without exposing any provider SDK to the UI."""
+        return self._client.reconcile(run_id, holder="streamlit")
+
 
 SELECTED_SESSION_KEY = "selected-session-id"
 DRAFT_STATE_KEY = "session-draft"
@@ -272,6 +277,13 @@ def render(identity: IdentityProvider, view: ChatViewModel | None = None) -> Non
     if selected_id is None:
         return
     selected = view.session(selected_id)
+    if selected.active_run_id is not None:
+        try:
+            view.reconcile(selected.active_run_id)
+        except ExecutionTemporaryError:
+            # Keep the last durable state visible and retry on the next refresh.
+            pass
+        selected = view.session(selected_id)
     runs = view.runs(selected.id)
     current_run = next((run for run in runs if run.id == selected.active_run_id), None)
     if current_run is None and runs:
@@ -285,6 +297,8 @@ def render(identity: IdentityProvider, view: ChatViewModel | None = None) -> Non
     id_right.caption(f"Cloud Run execution ID: `{execution_name}`")
     if current_run is not None:
         st.caption(f"Run ID: `{current_run.id}`")
+        if current_run.state.terminal and current_run.error_code:
+            st.error(f"実行は {current_run.state.value} で終了しました: {current_run.error_code}")
     if message and selected.active_run_id is None:
         result = view.start(selected, message, idempotency_key=str(uuid4()))
         st.session_state[f"last-run:{selected.id}"] = result.id

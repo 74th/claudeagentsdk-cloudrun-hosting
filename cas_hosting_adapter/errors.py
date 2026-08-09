@@ -80,7 +80,7 @@ class ExecutionPermissionError(HostingError):
 
 
 class ExecutionQuotaError(HostingError):
-    detail = ErrorDetail("execution_quota_exceeded", False, "execution")
+    detail = ErrorDetail("execution_quota_exceeded", True, "execution")
 
 
 class ActiveRunConflictError(HostingError):
