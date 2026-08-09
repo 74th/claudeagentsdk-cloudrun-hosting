@@ -214,6 +214,10 @@ resource "google_cloud_run_v2_job" "agent" {
           name  = "RUN_RETENTION_DAYS"
           value = tostring(var.retention_days)
         }
+        env {
+          name  = "QUESTION_TIMEOUT_SECONDS"
+          value = tostring(var.question_timeout_seconds)
+        }
       }
     }
   }

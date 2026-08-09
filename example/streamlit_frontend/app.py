@@ -8,14 +8,22 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from cas_hosting_adapter.errors import ExecutionTemporaryError
-from cas_hosting_adapter.models import ChatEvent, InitialSessionResult, Run, Session, SessionPage
+from cas_hosting_adapter.models import (
+    ChatEvent,
+    InitialSessionResult,
+    QuestionRequest,
+    Run,
+    RunState,
+    Session,
+    SessionPage,
+)
 from example.chat import (
     ChatService,
     CommonChatEvent,
     StaticIdentity,
     create_control_client_from_release_config,
 )
-from example.chat.events import normalize_events
+from example.chat.events import InteractionState, normalize_events
 
 ManualIdentity = StaticIdentity
 
@@ -93,6 +101,42 @@ class ChatViewModel:
     def events(self, run_id: UUID) -> list[ChatEvent]:
         return self._service.events(run_id)
 
+    def interaction_state(self, session_id: str, run_id: UUID) -> InteractionState:
+        return self._service.interaction_state_for_run(session_id, run_id)
+
+    def pending_questions(self, session_id: str, run_id: UUID) -> list[QuestionRequest]:
+        return self._service.pending_questions(session_id, run_id)
+
+    def answer_question(
+        self,
+        session_id: str,
+        run_id: UUID,
+        question_id: str,
+        answers: str | list[str],
+        idempotency_key: str,
+    ) -> QuestionRequest:
+        return self._service.answer_question(
+            session_id,
+            run_id,
+            question_id,
+            answers,
+            idempotency_key=idempotency_key,
+        )
+
+    def continue_after_question(
+        self,
+        session_id: str,
+        question: QuestionRequest,
+        answers: str | list[str],
+        idempotency_key: str,
+    ) -> Run:
+        return self._service.continue_after_question(
+            session_id,
+            question,
+            answers,
+            idempotency_key=idempotency_key,
+        ).run
+
     def cancel(self, run_id: UUID) -> Run:
         return self._service.cancel(run_id)
 
@@ -114,6 +158,11 @@ def session_label(session: Session) -> str:
     updated = session.updated_at.astimezone(JST)
     title = session.title.strip() or "Untitled session"
     return f"{updated:%Y-%m-%d %H:%M:%S JST} · {title}"
+
+
+def auto_refresh_allowed(interaction: InteractionState | None) -> bool:
+    """Avoid rerunning Streamlit while a question widget is being answered."""
+    return interaction is None or not interaction.pending_questions
 
 
 def create_view_from_release_config(path: Path, identity: StaticIdentity) -> ChatViewModel:
@@ -177,6 +226,7 @@ def render(view: ChatViewModel | None = None) -> None:
     current_run = next((run for run in runs if run.id == selected.active_run_id), None)
     if current_run is None and runs:
         current_run = runs[-1]
+    question_run = current_run
     st.header(selected.title.strip() or "Untitled session")
     st.caption(f"Session ID: `{selected.id}`")
     if current_run is not None:
@@ -203,12 +253,87 @@ def render(view: ChatViewModel | None = None) -> None:
             st.caption(f"進捗: {event.payload['description']}")
         elif event.type == "unknown":
             st.caption(f"未対応イベント: {event.raw_type}")
+    interaction: InteractionState | None = None
+    if question_run is not None and (
+        selected.active_run_id == question_run.id or question_run.state is RunState.TIMED_OUT
+    ):
+        try:
+            interaction = view.interaction_state(selected.id, question_run.id)
+        except Exception:
+            interaction = None
+        if interaction is not None and interaction.pending_questions:
+            st.subheader("回答待ちの質問")
+            for question in interaction.pending_questions:
+                st.markdown(f"**{question.header or '質問'}**")
+                st.write(question.question)
+                option_labels = [option.label for option in question.options]
+                other_label = "その他"
+                choices = option_labels + [other_label]
+                widget_key = f"question-answer:{question.id}"
+                selected_values = (
+                    st.multiselect(widget_key, choices, key=f"{widget_key}:choices")
+                    if question.multi_select
+                    else [st.radio(widget_key, choices, key=f"{widget_key}:choice")]
+                )
+                free_text = ""
+                if other_label in selected_values:
+                    free_text = st.text_input(
+                        "その他の回答", key=f"{widget_key}:other", disabled=False
+                    ).strip()
+                values = [value for value in selected_values if value != other_label]
+                if other_label in selected_values:
+                    if free_text:
+                        values = [free_text]
+                    else:
+                        values = []
+                sent_key = f"{widget_key}:sent"
+                if st.button(
+                    "回答を送信",
+                    key=f"{widget_key}:submit",
+                    disabled=bool(st.session_state.get(sent_key, False)),
+                ):
+                    if not values:
+                        st.error("選択または「その他」の入力が必要です。")
+                    else:
+                        try:
+                            st.session_state[sent_key] = True
+                            if question_run.state is RunState.TIMED_OUT:
+                                view.continue_after_question(
+                                    selected.id,
+                                    question,
+                                    values,
+                                    f"streamlit:continuation:{question_run.id}:{question.id}",
+                                )
+                                st.success("回答を反映して会話を再開しました。")
+                            else:
+                                view.answer_question(
+                                    selected.id,
+                                    question_run.id,
+                                    question.id,
+                                    values,
+                                    f"streamlit:{question.id}",
+                                )
+                                st.success("回答を受け付けました。")
+                            st.rerun()
+                        except Exception:
+                            st.session_state[sent_key] = False
+                            st.error("回答を受け付けられませんでした。再読み込みして状態を確認してください。")
+        if interaction is not None and interaction.task_list:
+            st.subheader("タスク進捗")
+            for task in interaction.task_list:
+                dependencies = (
+                    f"（依存: {', '.join(task.blocked_by)}）" if task.blocked_by else ""
+                )
+                st.write(f"`{task.task_id}` · {task.status} · {task.subject} {dependencies}")
     if current_run is not None and selected.active_run_id == current_run.id:
         if st.button("今すぐ更新"):
             st.rerun()
-        st.info("Cloud Run Job が実行中です。イベントを自動更新しています。")
-        sleep(2)
-        st.rerun()
+        if auto_refresh_allowed(interaction):
+            st.info("Cloud Run Job が実行中です。イベントを自動更新しています。")
+            sleep(2)
+            st.rerun()
+        else:
+            st.info("回答待ちのため自動更新を停止しています。回答後に状態を更新します。")
     if selected.active_run_id and st.button("Cancel"):
         st.warning(view.cancel(selected.active_run_id).state.value)
 

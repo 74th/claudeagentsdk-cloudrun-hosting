@@ -40,6 +40,7 @@ class ReleaseConfig(BaseModel):
     cloud_run: CloudRunReleaseSettings = Field(default_factory=CloudRunReleaseSettings)
     cloud_batch: CloudBatchReleaseSettings = Field(default_factory=CloudBatchReleaseSettings)
     task_timeout_seconds: int = Field(default=1800, ge=1, le=86400)
+    question_timeout_seconds: int = Field(default=300, ge=1, le=86400)
     task_retries: int = Field(default=0, ge=0, le=0)
     retention_days: int = Field(default=30, ge=1)
     log_level: str = "INFO"
@@ -127,6 +128,7 @@ class ReleaseConfig(BaseModel):
             "enable_cloud_run": self.enable_cloud_run,
             "enable_cloud_batch": self.enable_cloud_batch,
             "task_timeout_seconds": self.task_timeout_seconds,
+            "question_timeout_seconds": self.question_timeout_seconds,
             "retention_days": self.retention_days,
             "vertex_region": self.vertex_region,
             "claude_model": self.claude_model,

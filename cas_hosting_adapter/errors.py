@@ -63,6 +63,12 @@ class AgentError(HostingError):
     detail = ErrorDetail("agent_error", False, "agent")
 
 
+class AgentQuestionTimeoutError(AgentError):
+    """The agent was waiting for an answer that did not arrive in time."""
+
+    detail = ErrorDetail("timed_out", False, "question")
+
+
 class OperationError(HostingError):
     detail = ErrorDetail("operation_error", True, "operation")
 
@@ -93,3 +99,21 @@ class TimeoutError(HostingError):
 
 class ConfigurationError(HostingError):
     detail = ErrorDetail("configuration", False, "configuration")
+
+
+class QuestionNotFoundError(HostingError):
+    """Safe error that does not disclose another user's question."""
+
+    detail = ErrorDetail("question_not_found", False, "question")
+
+
+class QuestionOwnershipError(HostingError):
+    detail = ErrorDetail("question_owner_mismatch", False, "question")
+
+
+class QuestionConflictError(HostingError):
+    detail = ErrorDetail("question_conflict", False, "question")
+
+
+class QuestionClosedError(HostingError):
+    detail = ErrorDetail("question_closed", False, "question")

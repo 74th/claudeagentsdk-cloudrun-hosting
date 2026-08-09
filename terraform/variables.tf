@@ -77,6 +77,14 @@ variable "task_timeout_seconds" {
     error_message = "task_timeout_seconds must be between 1 and 86400 seconds."
   }
 }
+variable "question_timeout_seconds" {
+  type    = number
+  default = 300
+  validation {
+    condition     = var.question_timeout_seconds >= 1 && var.question_timeout_seconds <= 86400
+    error_message = "question_timeout_seconds must be between 1 and 86400 seconds."
+  }
+}
 variable "vertex_region" {
   type        = string
   description = "Vertex AI region used for Claude inference (independent of Cloud Run region)."

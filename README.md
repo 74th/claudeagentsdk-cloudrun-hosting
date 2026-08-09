@@ -99,6 +99,12 @@ uv run python -m example.slackbot_frontend.app --release-config release.example.
 
 Bot はイベントを即時 acknowledge し、バックグラウンドで run を開始します。処理中は同じステータスメッセージを作業内容と終端状態へ更新し、完了後は最終回答を新しいスレッド返信として投稿するため、Slack の通知を受け取れます。長い最終回答はSlackのメッセージ上限を超えないよう分割します。team/channel/thread とアプリケーション user/session の対応は release config の named Firestore database 内へ保存されるため、再起動後も同じスレッドを継続できます。Slack event ID を idempotency key に使い、Bot 自身の投稿は無視します。
 
+### 対話質問とタスク進捗のデモ
+
+Streamlit または Slack の入力に、エージェントへ選択を求める指示とタスク作成を促す内容（例: 「作業方針を選んで、確認しながら実行して」）を送ります。質問が表示されたら、定義済みの選択肢を 1 つ選ぶか、複数選択では複数項目を選びます。「その他」を選んだ場合は自由入力欄へ回答を入力します。Streamlit は回答ボタンを押すと同じ質問 ID を再送せず、Slack は表示された番号（単一選択は `1`、複数選択は `1,3`）または任意の自由入力を同じスレッドへ返信します。
+
+回答中に画面を再読み込みしたり Bot を再起動したりしても、未回答質問と最新の Task ID、状態（`pending`、`in_progress`、`completed`）、依存関係は永続履歴から復元されます。Task の更新は一般ツール履歴とは別の最新一覧として表示されます。質問への回答待ちは既定 5 分で timeout し、Job は `timed_out` として終了します。timeout 直前の workspace と Claude transcript は snapshot として保存されるため、後から Streamlit で選択肢を回答すると、同じ session の新しい Job が会話を resume し、回答を continuation prompt として反映します。なお、timeout 後は終了済み Job の callback を再開するのではなく、新しい run として継続します。
+
 ### Job、再訪、キャンセル、障害確認
 
 Job の起動は `example/Dockerfile` の `python -m example.agent` を entrypoint とします。Streamlit は `example/streamlit_frontend/app.py`、Slack は `example/slackbot_frontend/app.py` から起動します。画面を再訪すると保存済み履歴を読み直し、active run は reconcile して増分表示します。実行中の run は UI の Cancel または `ControlClient.cancel(run_id)` でキャンセルできます。Job の失敗や Execution 消失は `ControlClient.reconcile(run_id, holder=...)` で安全な終端状態へ補正します。

@@ -151,3 +151,29 @@ def test_unsuccessful_commit_discards_uncommitted_snapshot() -> None:
 
     assert committed.state is RunState.CANCELLED
     assert committed.snapshot is None
+
+
+def test_timed_out_commit_preserves_snapshot_for_session_resume() -> None:
+    store = InMemoryChatStore()
+    session = store.put_session(Session(id="s", user_id="u", workspace_id="w"))
+    run = Run(user_id="u", session_id=session.id, workspace_id="w", idempotency_key="k")
+    store.reserve_run(run, ChatEvent(id="input", run_id=run.id, sequence=0, type="user"))
+    invocation = JobInvocation(run.id, "execution-1")
+    runner = JobRunner(store)
+    assert runner.claim(invocation) is not None
+
+    snapshot = WorkspaceReference(
+        object_key="snapshot", version="1", sha256="0" * 64, size=1
+    )
+    committed = runner.commit_unsuccessful(
+        invocation,
+        RunState.TIMED_OUT,
+        error_code="question_timeout",
+        snapshot=snapshot,
+        claude_session_id="sdk-session",
+    )
+
+    assert committed.snapshot == snapshot
+    restored_session = store.get_session("u", "s")
+    assert restored_session.snapshot == snapshot
+    assert restored_session.claude_session_id == "sdk-session"

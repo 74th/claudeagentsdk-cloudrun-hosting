@@ -9,12 +9,13 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _ID_NAMESPACES = {
     "session": b"cas/session/v1",
     "workspace": b"cas/workspace/v1",
     "run": b"cas/run/v1",
+    "question": b"cas/question/v1",
 }
 
 
@@ -46,6 +47,24 @@ def derive_workspace_id(user_id: str, idempotency_key: str) -> str:
 def derive_run_id(user_id: str, idempotency_key: str) -> UUID:
     """Derive the first run ID without embedding user input in the ID."""
     return _deterministic_uuid("run", user_id, idempotency_key)
+
+
+def derive_question_id(run_id: UUID, request_key: str, ordinal: int) -> str:
+    """Derive a stable question ID for retries of one SDK request."""
+    if not request_key.strip():
+        raise ValueError("request_key must not be blank")
+    if ordinal < 1:
+        raise ValueError("ordinal must be positive")
+    digest = hashlib.sha256(
+        _ID_NAMESPACES["question"]
+        + b"\0"
+        + str(run_id).encode("utf-8")
+        + b"\0"
+        + request_key.strip().encode("utf-8")
+        + b"\0"
+        + str(ordinal).encode("ascii")
+    ).hexdigest()
+    return f"question-{digest[:32]}"
 
 
 def normalize_session_title(prompt: str, *, max_length: int = 80) -> str:
@@ -175,6 +194,136 @@ class ChatEvent(BaseModel):
     type: str = Field(min_length=1)
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class QuestionState(StrEnum):
+    PENDING = "pending"
+    ANSWERED = "answered"
+
+
+class QuestionOption(BaseModel):
+    """Provider-neutral option shown to a user."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    label: str = Field(min_length=1, max_length=1000)
+    description: str = Field(default="", max_length=4000)
+
+    @field_validator("label")
+    @classmethod
+    def label_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("option label must not be blank")
+        return value.strip()
+
+
+class QuestionRequest(BaseModel):
+    """Durable, provider-neutral representation of an SDK question."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str = Field(min_length=1)
+    run_id: UUID
+    ordinal: int = Field(ge=1)
+    question: str = Field(min_length=1, max_length=10000)
+    header: str = Field(default="", max_length=200)
+    options: list[QuestionOption] = Field(min_length=2, max_length=4)
+    multi_select: bool = False
+    state: QuestionState = QuestionState.PENDING
+    answers: list[str] | None = None
+    answer_idempotency_key: str | None = None
+    idempotency_key: str = Field(min_length=1)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    answered_at: datetime | None = None
+    expires_at: datetime | None = None
+
+    @field_validator("question", "idempotency_key")
+    @classmethod
+    def text_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("question text must not be blank")
+        return value.strip()
+
+    @field_validator("options")
+    @classmethod
+    def options_must_be_unique(cls, value: list[QuestionOption]) -> list[QuestionOption]:
+        if len({option.label for option in value}) != len(value):
+            raise ValueError("option labels must be unique")
+        return value
+
+    @classmethod
+    def from_input(
+        cls,
+        *,
+        run_id: UUID,
+        request_key: str,
+        ordinal: int,
+        question: str,
+        header: str = "",
+        options: list[QuestionOption | dict[str, Any]],
+        multi_select: bool = False,
+        created_at: datetime | None = None,
+        expires_at: datetime | None = None,
+    ) -> QuestionRequest:
+        return cls(
+            id=derive_question_id(run_id, request_key, ordinal),
+            run_id=run_id,
+            ordinal=ordinal,
+            question=question,
+            header=header,
+            options=[QuestionOption.model_validate(option) for option in options],
+            multi_select=multi_select,
+            idempotency_key=request_key,
+            created_at=created_at or datetime.now(UTC),
+            expires_at=expires_at,
+        )
+
+    @property
+    def pending(self) -> bool:
+        return self.state is QuestionState.PENDING
+
+    @property
+    def status(self) -> QuestionState:
+        return self.state
+
+    @property
+    def text(self) -> str:
+        return self.question
+
+    @property
+    def answer(self) -> str | list[str] | None:
+        if self.answers is None:
+            return None
+        return self.answers[0] if not self.multi_select and self.answers else self.answers
+
+    def validate_answers(self, values: str | list[str] | tuple[str, ...]) -> list[str]:
+        """Validate UI/Slack answers and discard the presentation-only その他 label."""
+        raw = [values] if isinstance(values, str) else list(values)
+        normalized = [value.strip() for value in raw if isinstance(value, str) and value.strip()]
+        if not normalized:
+            raise ValueError("answer must not be blank")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("answers must not contain duplicates")
+        labels = {option.label for option in self.options}
+        if all(value in labels for value in normalized):
+            if not self.multi_select and len(normalized) != 1:
+                raise ValueError("single-select question accepts exactly one answer")
+            return normalized
+        if len(normalized) != 1:
+            raise ValueError("free-text answer must contain exactly one value")
+        return normalized
+
+
+def validate_question_batch(questions: list[QuestionRequest]) -> list[QuestionRequest]:
+    if not 1 <= len(questions) <= 4:
+        raise ValueError("one SDK question request must contain between 1 and 4 questions")
+    ordinals = [question.ordinal for question in questions]
+    if len(set(ordinals)) != len(ordinals) or any(ordinal > 4 for ordinal in ordinals):
+        raise ValueError("question ordinals must be unique")
+    return sorted(questions, key=lambda question: question.ordinal)
+
+
+Question = QuestionRequest
 
 
 class Session(BaseModel):

@@ -16,6 +16,7 @@ from .models import (
     ExecutionReference,
     ExecutionState,
     InitialSessionResult,
+    QuestionRequest,
     ReconciliationLease,
     Run,
     RunPage,
@@ -88,6 +89,29 @@ class ChatStore(Protocol):
         self, run_id: UUID, holder: str, state: RunState, *, error_code: str | None = None
     ) -> Run: ...
     def release_reconciliation_lease(self, run_id: UUID, holder: str) -> None: ...
+    def create_questions(
+        self, run_id: UUID, questions: list[QuestionRequest]
+    ) -> list[QuestionRequest]: ...
+    def list_questions_for_job(self, run_id: UUID) -> list[QuestionRequest]: ...
+    def get_question_for_job(self, run_id: UUID, question_id: str) -> QuestionRequest: ...
+    def list_questions(
+        self, user_id: str, session_id: str, run_id: UUID
+    ) -> list[QuestionRequest]: ...
+    def answer_question(
+        self,
+        user_id: str,
+        session_id: str,
+        run_id: UUID,
+        question_id: str,
+        answers: str | list[str],
+        idempotency_key: str,
+    ) -> QuestionRequest: ...
+    def answer_question_for_job(
+        self, run_id: UUID, question_id: str, answers: str | list[str], idempotency_key: str
+    ) -> QuestionRequest: ...
+    def subscribe_question(
+        self, run_id: UUID, question_id: str, callback: Callable[[QuestionRequest], None]
+    ) -> Callable[[], None]: ...
 
 
 class WorkspaceStore(Protocol):

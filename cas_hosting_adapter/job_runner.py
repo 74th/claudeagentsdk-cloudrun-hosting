@@ -100,7 +100,23 @@ class JobRunner:
                     LOGGER.warning("job.events.runtime_timeout run_id=%s", invocation.run_id)
                     return RunState.TIMED_OUT
             try:
-                timeout = limits.idle_timeout.total_seconds() if limits is not None else None
+                pending_question = False
+                try:
+                    pending_question = any(
+                        question.pending
+                        for question in self._chat_store.list_questions_for_job(invocation.run_id)
+                    )
+                except (AttributeError, KeyError):
+                    # Older/fake ChatStore implementations have no question
+                    # contract and retain the original idle-timeout behavior.
+                    pending_question = False
+                timeout = (
+                    min(limits.idle_timeout.total_seconds(), 10.0)
+                    if limits is not None and pending_question
+                    else limits.idle_timeout.total_seconds()
+                    if limits is not None
+                    else None
+                )
                 if remaining_runtime is not None:
                     assert timeout is not None
                     timeout = min(timeout, remaining_runtime)
@@ -108,6 +124,12 @@ class JobRunner:
             except StopAsyncIteration:
                 break
             except TimeoutError:
+                if pending_question and remaining_runtime is not None and remaining_runtime > 0:
+                    if not self._chat_store.heartbeat_run(
+                        invocation.run_id, invocation.execution_identity
+                    ):
+                        return RunState.FAILED
+                    continue
                 await self._stop_iterator(iterator)
                 LOGGER.warning("job.events.idle_timeout run_id=%s", invocation.run_id)
                 return RunState.TIMED_OUT
@@ -155,17 +177,28 @@ class JobRunner:
         raise AgentError("run has no persisted user prompt")
 
     def commit_unsuccessful(
-        self, invocation: JobInvocation, state: RunState, *, error_code: str | None = None
+        self,
+        invocation: JobInvocation,
+        state: RunState,
+        *,
+        error_code: str | None = None,
+        snapshot: WorkspaceReference | None = None,
+        claude_session_id: str | None = None,
     ) -> Run:
-        """Terminal failure paths never attach a new workspace snapshot."""
+        """Commit a terminal run, optionally preserving a resumable snapshot."""
         if state not in {RunState.FAILED, RunState.CANCELLED, RunState.TIMED_OUT}:
             raise ValueError("unsuccessful terminal state is required")
         current = self._chat_store.get_run_for_job(invocation.run_id)
-        terminal = current.model_copy(update={
+        update: dict[str, object] = {
             "state": state,
             "error_code": error_code,
             "finished_at": datetime.now(UTC),
-        })
+        }
+        if snapshot is not None:
+            update["snapshot"] = snapshot
+        if claude_session_id is not None:
+            update["claude_session_id"] = claude_session_id
+        terminal = current.model_copy(update=update)
         return self._chat_store.commit_terminal(terminal, invocation.execution_identity)
 
     def commit_success(

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -148,3 +149,45 @@ def test_user_tool_result_messages_are_not_stored_as_user_events() -> None:
             },
         )
     ]
+
+
+def test_question_broker_enables_sdk_streaming_permission_mode(tmp_path: Path) -> None:
+    adapter = ClaudeAgentAdapter(model="test-model")
+    options = adapter._options(
+        workspace=tmp_path,
+        transcript_dir=tmp_path / "transcript",
+        resume=None,
+        can_use_tool=lambda *_args: None,
+    )
+    assert options["permission_mode"] == "default"
+    assert options["can_use_tool"] is not None
+
+
+@pytest.mark.asyncio
+async def test_streaming_prompt_uses_claude_sdk_user_envelope() -> None:
+    messages = [message async for message in ClaudeAgentAdapter._prompt_stream("hello")]
+    assert messages == [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "hello"},
+            "parent_tool_use_id": None,
+            "session_id": "default",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_streaming_prompt_stays_open_until_run_finishes() -> None:
+    done = asyncio.Event()
+    stream = ClaudeAgentAdapter._prompt_stream("hello", done)
+
+    first = await anext(stream)
+    assert first["message"]["content"] == "hello"
+
+    waiting = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    done.set()
+    with pytest.raises(StopAsyncIteration):
+        await waiting

@@ -43,6 +43,7 @@ class GoogleCloudSettings:
     batch_cpu_milli: int = 2000
     batch_memory_mib: int = 4096
     task_timeout_seconds: int = 1800
+    question_timeout_seconds: int = 300
     vertex_region: str = "us-east5"
     claude_model: str = "claude-haiku-4-5@20251001"
     log_level: str = "INFO"
@@ -72,6 +73,8 @@ class GoogleCloudSettings:
             raise ValueError("Batch CPU and memory must be positive")
         if not 1 <= self.task_timeout_seconds <= 86400:
             raise ValueError("task_timeout_seconds must be between 1 and 86400")
+        if not 1 <= self.question_timeout_seconds <= 86400:
+            raise ValueError("question_timeout_seconds must be between 1 and 86400")
 
 
 @dataclass(frozen=True)
@@ -141,6 +144,7 @@ def create_google_cloud_control_client(settings: GoogleCloudSettings) -> Control
                 "FIRESTORE_DATABASE": settings.firestore_database,
                 "WORKSPACE_BUCKET": settings.bucket_name,
                 "RUN_RETENTION_DAYS": str(settings.retention_days),
+                "QUESTION_TIMEOUT_SECONDS": str(settings.question_timeout_seconds),
             },
         )
     )

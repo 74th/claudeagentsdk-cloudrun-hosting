@@ -4,12 +4,13 @@ from cas_hosting_adapter.in_memory_chat_store import InMemoryChatStore
 from cas_hosting_adapter.models import ChatEvent, ExecutionState, RunState
 from cas_hosting_adapter.protocols import InMemoryExecutionBackend
 from example.chat import ChatService
-from example.chat.events import normalize_events
+from example.chat.events import InteractionState, normalize_events
 from example.streamlit_frontend.app import (
     DRAFT_STATE_KEY,
     SELECTED_SESSION_KEY,
     ChatViewModel,
     ManualIdentity,
+    auto_refresh_allowed,
     create_view_from_release_config,
     order_sessions,
     session_label,
@@ -56,6 +57,11 @@ def test_order_sessions_returns_newest_updated_session_first() -> None:
     )
 
     assert [session.id for session in order_sessions([older, newer])] == ["newer", "older"]
+
+
+def test_streamlit_auto_refresh_stops_while_a_question_is_pending() -> None:
+    assert auto_refresh_allowed(InteractionState()) is True
+    assert auto_refresh_allowed(InteractionState(pending_questions=(object(),))) is False
 
 
 def test_view_model_creates_session_and_starts_run() -> None:

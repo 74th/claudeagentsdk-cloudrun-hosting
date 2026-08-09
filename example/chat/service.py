@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -13,10 +14,26 @@ from uuid import UUID, uuid4
 from cas_hosting_adapter.control_client import ControlClient
 from cas_hosting_adapter.errors import ExecutionTemporaryError
 from cas_hosting_adapter.factory import GoogleCloudSettings, create_google_cloud_control_client
-from cas_hosting_adapter.models import ChatEvent, Run, RunPage, Session, SessionPage
+from cas_hosting_adapter.models import (
+    ChatEvent,
+    QuestionRequest,
+    Run,
+    RunPage,
+    Session,
+    SessionPage,
+)
 from cas_hosting_adapter.release_config import load_release_config
 
-from .events import ChatEventKind, CommonChatEvent, normalize_event, normalize_events
+from .events import (
+    ChatEventKind,
+    CommonChatEvent,
+    InteractionState,
+    normalize_event,
+    normalize_events,
+)
+from .events import (
+    interaction_state as build_interaction_state,
+)
 from .identity import IdentityProvider
 
 LOGGER = logging.getLogger(__name__)
@@ -189,6 +206,84 @@ class ChatService:
     def events(self, run_id: UUID) -> list[ChatEvent]:
         return self._client.list_events(run_id)
 
+    def pending_questions(self, session_id: str, run_id: UUID) -> list[QuestionRequest]:
+        """Return only questions visible inside this user's active run."""
+        return [
+            question
+            for question in self._client.list_questions(self.user_id, session_id, run_id)
+            if question.pending
+        ]
+
+    def answer_question(
+        self,
+        session_id: str,
+        run_id: UUID,
+        question_id: str,
+        answers: str | list[str],
+        *,
+        idempotency_key: str,
+    ) -> QuestionRequest:
+        return self._client.answer_question(
+            self.user_id,
+            session_id,
+            run_id,
+            question_id,
+            answers,
+            idempotency_key,
+        )
+
+    def continue_after_question(
+        self,
+        session_id: str,
+        question: QuestionRequest,
+        answers: str | list[str],
+        *,
+        idempotency_key: str,
+    ) -> ChatStartResult:
+        """Start a resumable continuation after a timed-out question.
+
+        The original SDK callback belongs to the terminated Job, so a late
+        answer is carried into a new run as an explicit user instruction.
+        The new Job resumes the session snapshot stored on the parent session.
+        """
+        values = [answers] if isinstance(answers, str) else list(answers)
+        if not values or any(not value.strip() for value in values):
+            raise ValueError("question answers must not be blank")
+        prompt = (
+            "前回の実行は、利用者への質問待ちのままタイムアウトしました。"
+            "前回の会話コンテキストを引き継ぎ、以下の回答を反映して作業を続行してください。\n\n"
+            f"質問: {question.question}\n"
+            f"利用者の回答: {json.dumps(values, ensure_ascii=False)}"
+        )
+        return self.start(
+            prompt,
+            session_id=session_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def interaction_state(
+        self, events: list[ChatEvent] | list[CommonChatEvent]
+    ) -> InteractionState:
+        """Reduce a durable event list to the common interaction view model."""
+        if not events:
+            return build_interaction_state([])
+        first = events[0]
+        normalized = (
+            events if isinstance(first, CommonChatEvent) else normalize_events(events)  # type: ignore[arg-type]
+        )
+        return build_interaction_state(normalized)
+
+    def interaction_state_for_run(self, session_id: str, run_id: UUID) -> InteractionState:
+        state = self.interaction_state(self.events(run_id))
+        # The canonical question collection is authoritative if an event watch
+        # was disconnected, while task state remains event-derived.
+        pending = tuple(self.pending_questions(session_id, run_id))
+        return InteractionState(
+            pending_questions=pending,
+            tasks=state.tasks,
+            task_order=state.task_order,
+        )
+
     def cancel(self, run_id: UUID) -> Run:
         return self._client.cancel(run_id)
 
@@ -238,6 +333,7 @@ def create_control_client_from_release_config(path: Path) -> ControlClient:
         batch_cpu_milli=release.cloud_batch.cpu_milli,
         batch_memory_mib=release.cloud_batch.memory_mib,
         task_timeout_seconds=release.task_timeout_seconds,
+        question_timeout_seconds=release.question_timeout_seconds,
         vertex_region=release.vertex_region,
         claude_model=release.claude_model,
         log_level=release.log_level,

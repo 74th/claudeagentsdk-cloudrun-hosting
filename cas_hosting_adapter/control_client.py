@@ -11,6 +11,7 @@ from .models import (
     ChatEvent,
     ExecutionState,
     InitialSessionResult,
+    QuestionRequest,
     Run,
     RunPage,
     RunState,
@@ -145,6 +146,40 @@ class ControlClient:
         ):
             deliver(event)
         return self._chat_store.subscribe(run_id, cursor, deliver)
+
+    def list_questions(
+        self, user_id: str, session_id: str, run_id: UUID
+    ) -> list[QuestionRequest]:
+        """List durable interaction state inside the caller's ownership boundary."""
+        return self._chat_store.list_questions(user_id, session_id, run_id)
+
+    def answer_question(
+        self,
+        user_id: str,
+        session_id: str,
+        run_id: UUID,
+        question_id: str,
+        answers: str | list[str],
+        idempotency_key: str,
+    ) -> QuestionRequest:
+        return self._chat_store.answer_question(
+            user_id, session_id, run_id, question_id, answers, idempotency_key
+        )
+
+    def create_questions_for_job(
+        self, run_id: UUID, questions: list[QuestionRequest]
+    ) -> list[QuestionRequest]:
+        return self._chat_store.create_questions(run_id, questions)
+
+    def questions_for_job(self, run_id: UUID) -> list[QuestionRequest]:
+        return self._chat_store.list_questions_for_job(run_id)
+
+    def answer_question_for_job(
+        self, run_id: UUID, question_id: str, answers: str | list[str], idempotency_key: str
+    ) -> QuestionRequest:
+        return self._chat_store.answer_question_for_job(
+            run_id, question_id, answers, idempotency_key
+        )
 
     def cancel(self, run_id: UUID) -> Run:
         run = self._chat_store.request_cancel(run_id)

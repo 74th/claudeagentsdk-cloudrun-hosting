@@ -9,11 +9,13 @@ def test_example_release_config_is_valid() -> None:
     config = load_release_config(Path("release.example.yaml"))
     assert config.schema_version == "3"
     assert config.retention_days == 30
+    assert config.question_timeout_seconds == 300
     assert config.terraform_variables()["job_name"] == "test-claudesdk-cloudrun"
     assert config.terraform_variables()["firestore_database"] == "claude-agent-chat"
     assert config.terraform_variables()["vertex_region"] == "us-east5"
     assert config.terraform_variables()["claude_model"] == "claude-haiku-4-5@20251001"
     assert config.terraform_variables()["retention_days"] == 30
+    assert config.terraform_variables()["question_timeout_seconds"] == 300
     assert "run_retention_days" not in config.terraform_variables()
 
 

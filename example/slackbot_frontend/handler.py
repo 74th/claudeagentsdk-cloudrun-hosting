@@ -3,17 +3,50 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from cas_hosting_adapter.models import QuestionRequest
 from example.chat import ChatService, normalize_events
 
 from .store import SlackThreadKey, SlackThreadSessionStore, application_user_id
 
 LOGGER = logging.getLogger(__name__)
 MAX_SLACK_TEXT_LENGTH = 3900
+
+
+def parse_question_answer(text: str, question: QuestionRequest) -> list[str] | None:
+    """Parse strict 1-based Slack numbers or preserve non-number free text."""
+    value = text.strip()
+    if not value:
+        return None
+    if re.fullmatch(r"[\d,\s]+", value) and not re.fullmatch(r"\d+(?:,\d+)*", value):
+        return None
+    if re.fullmatch(r"\d+(?:,\d+)*", value):
+        numbers = [int(part) for part in value.split(",")]
+        if len(set(numbers)) != len(numbers):
+            return None
+        if any(number < 1 or number > len(question.options) for number in numbers):
+            return None
+        if not question.multi_select and len(numbers) != 1:
+            return None
+        return [question.options[number - 1].label for number in numbers]
+    return [value]
+
+
+def format_question(question: QuestionRequest) -> str:
+    """Render one question with stable ordinal numbers for Slack replies."""
+    lines = [f"{question.header}:" if question.header else "質問:", question.question]
+    lines.extend(
+        f"{index}. {option.label} — {option.description}".rstrip(" —")
+        for index, option in enumerate(question.options, 1)
+    )
+    example = "1,3" if question.multi_select else "1"
+    lines.append(f"番号で回答してください（例: {example}）。自由入力も可能です。")
+    return "\n".join(lines)
 
 
 class SlackMessageHandler:
@@ -101,6 +134,38 @@ class SlackMessageHandler:
                 if binding.application_user_id != app_user_id:
                     self._post(client, key, "このスレッドは別の Slack 利用者に紐付いています。")
                     return
+                pending = self._pending_question(service, binding.session_id)
+                if pending is not None:
+                    values = parse_question_answer(prompt, pending)
+                    if values is None:
+                        self._post(
+                            client,
+                            key,
+                            "入力を解釈できません。"
+                            + (
+                                " 複数選択は `1,3` の形式です。"
+                                if pending.multi_select
+                                else " `1` のような番号で回答してください。"
+                            ),
+                        )
+                        return
+                    try:
+                        service.answer_question(
+                            binding.session_id,
+                            pending.run_id,
+                            pending.id,
+                            values,
+                            idempotency_key=idempotency_key,
+                        )
+                    except Exception:
+                        self._post(
+                            client,
+                            key,
+                            "この質問は既に回答済みか、回答受付が終了しています。",
+                        )
+                        return
+                    self._post(client, key, "回答を受け付けました。処理を続行します…")
+                    return
                 started = service.start(
                     prompt,
                     session_id=binding.session_id,
@@ -126,6 +191,8 @@ class SlackMessageHandler:
         activity: list[str] = []
         tool_names: dict[str, str] = {}
         terminal_state: str | None = None
+        presented_questions: set[str] = set()
+        task_lines: list[str] = []
         last_update = 0.0
         for event in service.stream(run):
             now = time.monotonic()
@@ -155,12 +222,27 @@ class SlackMessageHandler:
                 activity.append(f"ツール完了: {name}{suffix}")
             elif event.type == "progress" and event.content:
                 activity.append(f"進捗: {event.content}")
+            elif event.type == "question_pending" and event.question is not None:
+                if event.question.id not in presented_questions:
+                    self._post(client, key, format_question(event.question))
+                    presented_questions.add(event.question.id)
+            elif event.type == "question_answered":
+                activity.append("質問への回答を受け付けました")
             elif event.type == "terminal":
                 terminal_state = str(event.payload.get("state", "unknown"))
             elif event.type == "unknown":
                 activity.append(f"イベント: {event.raw_type}")
             terminal = event.type in {"final", "terminal"}
-            message = self._compose_message(activity, "", terminal_state)
+            if hasattr(service, "interaction_state_for_run"):
+                try:
+                    interaction = service.interaction_state_for_run(run.session_id, run.id)
+                    task_lines = [
+                        f"{task.task_id}: {task.status} {task.subject}".strip()
+                        for task in interaction.task_list
+                    ]
+                except Exception:
+                    task_lines = []
+            message = self._compose_message(activity, "", terminal_state, task_lines)
             if message and (now - last_update >= self._update_interval or terminal):
                 self._update(client, response, message)
                 LOGGER.info("slack.reply.updated run_id=%s length=%d", run.id, len(message))
@@ -191,7 +273,7 @@ class SlackMessageHandler:
                 terminal_state = service.get_run(run.session_id, run.id).state.value
             except Exception:
                 LOGGER.debug("slack.run.state_unavailable run_id=%s", run.id)
-        message = self._compose_message(activity, "", terminal_state)
+        message = self._compose_message(activity, "", terminal_state, task_lines)
         final_message = message or "処理が完了しました。"
         self._update(client, response, final_message)
         LOGGER.info("slack.reply.updated run_id=%s length=%d", run.id, len(final_message))
@@ -208,11 +290,15 @@ class SlackMessageHandler:
 
     @staticmethod
     def _compose_message(
-        activity: list[str], result: str, terminal_state: str | None
+        activity: list[str], result: str, terminal_state: str | None,
+        tasks: list[str] | None = None,
     ) -> str:
         """作業履歴と結果を Slack の安全な長さへ整形する。"""
         activity_text = "\n".join(dict.fromkeys(activity))
         prefix = f"作業内容:\n{activity_text}" if activity_text else ""
+        task_text = "\n".join(dict.fromkeys(tasks or []))
+        if task_text:
+            prefix = "\n\n".join(part for part in (prefix, f"タスク:\n{task_text}") if part)
         result_text = f"最終結果:\n{result}" if result else ""
         state_text = f"実行終了: {terminal_state}" if terminal_state else ""
         suffix = "\n\n".join(part for part in (result_text, state_text) if part)
@@ -223,6 +309,20 @@ class SlackMessageHandler:
         else:
             message = prefix or suffix
         return SlackMessageHandler._truncate(message, MAX_SLACK_TEXT_LENGTH)
+
+    @staticmethod
+    def _pending_question(service: ChatService, session_id: str) -> QuestionRequest | None:
+        if not hasattr(service, "get_session") or not hasattr(service, "pending_questions"):
+            return None
+        try:
+            session = service.get_session(session_id)
+            if session.active_run_id is None:
+                return None
+            questions = service.pending_questions(session_id, session.active_run_id)
+            return questions[0] if questions else None
+        except Exception:
+            LOGGER.debug("slack.question.pending_lookup_failed", exc_info=True)
+            return None
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:

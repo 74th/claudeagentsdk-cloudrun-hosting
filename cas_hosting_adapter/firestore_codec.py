@@ -6,7 +6,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .models import ChatEvent, Run, Session
+from .models import ChatEvent, QuestionRequest, Run, Session
 
 SCHEMA_VERSION = "1"
 DEFAULT_RETENTION_DAYS = 30
@@ -57,6 +57,27 @@ def encode_event(
     payload = {"schema_version": SCHEMA_VERSION, **event.model_dump(mode="json")}
     payload["expires_at"] = expiry_at(event.occurred_at, retention_days)
     return payload
+
+
+def encode_question(
+    question: QuestionRequest,
+    *,
+    retention_days: int = DEFAULT_RETENTION_DAYS,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Encode a question without depending on the Firestore SDK."""
+    payload = {"schema_version": SCHEMA_VERSION, **question.model_dump(mode="json")}
+    payload["expires_at"] = expiry_at(
+        now or question.expires_at or question.created_at, retention_days
+    )
+    return payload
+
+
+def decode_question(payload: dict[str, Any]) -> QuestionRequest:
+    """Decode legacy and current question records."""
+    value = dict(payload)
+    value.pop("schema_version", None)
+    return QuestionRequest.model_validate(value)
 
 
 def decode_timestamp(value: Any) -> datetime:

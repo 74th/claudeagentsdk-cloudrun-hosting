@@ -9,11 +9,21 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from .errors import ActiveRunConflictError, SessionNotFoundError, SessionOwnershipError
+from .errors import (
+    ActiveRunConflictError,
+    QuestionClosedError,
+    QuestionConflictError,
+    QuestionNotFoundError,
+    QuestionOwnershipError,
+    SessionNotFoundError,
+    SessionOwnershipError,
+)
 from .firestore_codec import (
     DEFAULT_RETENTION_DAYS,
+    decode_question,
     decode_timestamp,
     encode_event,
+    encode_question,
     encode_run,
     encode_session,
     is_expired,
@@ -23,12 +33,15 @@ from .models import (
     ChatEvent,
     ExecutionReference,
     InitialSessionResult,
+    QuestionRequest,
+    QuestionState,
     ReconciliationLease,
     Run,
     RunPage,
     RunState,
     Session,
     SessionPage,
+    validate_question_batch,
 )
 from .protocols import Clock
 
@@ -536,10 +549,10 @@ class FirestoreChatStore:
                 "updated_at": now,
                 "expires_at": now + timedelta(days=self._retention_days),
             }
-            # Keep the last completed conversation when a later run fails;
-            # otherwise a transient Job failure permanently breaks resume.
+            # Keep a resumable transcript for completed runs and question
+            # timeouts. A later continuation run can restore that snapshot.
             if (
-                run.state is RunState.COMPLETED
+                run.state in {RunState.COMPLETED, RunState.TIMED_OUT}
                 and run.claude_session_id is not None
                 and run.snapshot is not None
             ):
@@ -635,6 +648,239 @@ class FirestoreChatStore:
         snapshot = lease_ref.get()
         if snapshot.exists and snapshot.to_dict().get("holder") == holder:
             lease_ref.delete()
+
+    def _run_reference(self, run_id: UUID) -> Any:
+        found = list(
+            self._client.collection_group("runs").where("id", "==", str(run_id)).limit(1).stream()
+        )
+        if not found:
+            raise QuestionNotFoundError(str(run_id))
+        payload = dict(found[0].to_dict())
+        if is_expired(payload, self._now()):
+            raise QuestionNotFoundError(str(run_id))
+        return found[0].reference
+
+    def create_questions(
+        self, run_id: UUID, questions: list[QuestionRequest]
+    ) -> list[QuestionRequest]:
+        """Persist a question batch idempotently before the SDK waits."""
+        from google.cloud.firestore import transactional
+
+        ordered = validate_question_batch(questions)
+        if any(question.run_id != run_id for question in ordered):
+            raise ValueError("question run IDs do not match")
+        run_ref = self._run_reference(run_id)
+        transaction = self._client.transaction()
+
+        def create(transaction: Any) -> list[QuestionRequest]:
+            run_snapshot = run_ref.get(transaction=transaction)
+            run_payload = dict(run_snapshot.to_dict() or {})
+            if run_payload.get("state") not in {
+                RunState.REQUESTED.value,
+                RunState.DISPATCHING.value,
+                RunState.PENDING.value,
+                RunState.RUNNING.value,
+            }:
+                raise QuestionClosedError(str(run_id))
+            result: list[QuestionRequest] = []
+            for question in ordered:
+                ref = run_ref.collection("questions").document(question.id)
+                snapshot = ref.get(transaction=transaction)
+                if snapshot.exists:
+                    existing = decode_question(dict(snapshot.to_dict() or {}))
+                    if (
+                        existing.question != question.question
+                        or existing.options != question.options
+                    ):
+                        raise QuestionConflictError(question.id)
+                    result.append(existing)
+                    continue
+                now = self._now()
+                stored = question.model_copy(
+                    update={
+                        "expires_at": question.expires_at
+                        or now + timedelta(days=self._retention_days)
+                    }
+                )
+                transaction.create(
+                    ref,
+                    encode_question(stored, retention_days=self._retention_days, now=now),
+                )
+                result.append(stored)
+            return result
+
+        result = cast(list[QuestionRequest], transactional(create)(transaction))
+        # Event history is deliberately separate from the canonical question
+        # record; retries remain idempotent because event IDs are question IDs.
+        for question in result:
+            try:
+                self.append_event(
+                    ChatEvent(
+                        id=f"question_pending:{question.id}",
+                        run_id=run_id,
+                        sequence=0,
+                        type="question_pending",
+                        occurred_at=question.created_at,
+                        payload=question.model_dump(mode="json"),
+                    )
+                )
+            except Exception:
+                # A duplicate or a transient event write must not cause the
+                # durable question itself to be created twice.
+                pass
+        return result
+
+    def create_question(self, question: QuestionRequest) -> QuestionRequest:
+        return self.create_questions(question.run_id, [question])[0]
+
+    def list_questions_for_job(self, run_id: UUID) -> list[QuestionRequest]:
+        run_ref = self._run_reference(run_id)
+        result: list[QuestionRequest] = []
+        for snapshot in run_ref.collection("questions").order_by("ordinal").stream():
+            payload = dict(snapshot.to_dict() or {})
+            if not is_expired(payload, self._now()):
+                result.append(decode_question(payload))
+        return result
+
+    list_questions_for_run = list_questions_for_job
+
+    def get_question_for_job(self, run_id: UUID, question_id: str) -> QuestionRequest:
+        run_ref = self._run_reference(run_id)
+        snapshot = run_ref.collection("questions").document(question_id).get()
+        if not snapshot.exists:
+            raise QuestionNotFoundError(question_id)
+        payload = dict(snapshot.to_dict() or {})
+        if is_expired(payload, self._now()):
+            raise QuestionNotFoundError(question_id)
+        return decode_question(payload)
+
+    def list_questions(
+        self, user_id: str, session_id: str, run_id: UUID
+    ) -> list[QuestionRequest]:
+        run = self.get_run(user_id, session_id, run_id)
+        if run.user_id != user_id or run.session_id != session_id:
+            raise QuestionOwnershipError(str(run_id))
+        return self.list_questions_for_job(run_id)
+
+    def answer_question_for_job(
+        self, run_id: UUID, question_id: str, answers: str | list[str], idempotency_key: str
+    ) -> QuestionRequest:
+        from google.cloud.firestore import transactional
+
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key must not be blank")
+        run_ref = self._run_reference(run_id)
+        question_ref = run_ref.collection("questions").document(question_id)
+        transaction = self._client.transaction()
+
+        def answer(transaction: Any) -> QuestionRequest:
+            run_snapshot = run_ref.get(transaction=transaction)
+            run_payload = dict(run_snapshot.to_dict() or {})
+            if run_payload.get("state") not in {
+                RunState.REQUESTED.value,
+                RunState.DISPATCHING.value,
+                RunState.PENDING.value,
+                RunState.RUNNING.value,
+            }:
+                raise QuestionClosedError(question_id)
+            snapshot = question_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise QuestionNotFoundError(question_id)
+            payload = dict(snapshot.to_dict() or {})
+            if is_expired(payload, self._now()):
+                raise QuestionNotFoundError(question_id)
+            question = decode_question(payload)
+            values = question.validate_answers(answers)
+            if question.state is QuestionState.ANSWERED:
+                if (
+                    question.answer_idempotency_key == idempotency_key
+                    and question.answers == values
+                ):
+                    return question
+                raise QuestionConflictError(question_id)
+            answered = question.model_copy(
+                update={
+                    "state": QuestionState.ANSWERED,
+                    "answers": values,
+                    "answer_idempotency_key": idempotency_key,
+                    "answered_at": self._now(),
+                }
+            )
+            transaction.update(
+                question_ref,
+                {
+                    "state": answered.state.value,
+                    "answers": values,
+                    "answer_idempotency_key": idempotency_key,
+                    "answered_at": answered.answered_at,
+                    "expires_at": self._now() + timedelta(days=self._retention_days),
+                },
+            )
+            return answered
+
+        answered = cast(QuestionRequest, transactional(answer)(transaction))
+        if answered.state is QuestionState.ANSWERED:
+            try:
+                self.append_event(
+                    ChatEvent(
+                        id=f"question_answered:{question_id}",
+                        run_id=run_id,
+                        sequence=0,
+                        type="question_answered",
+                        occurred_at=answered.answered_at or self._now(),
+                        payload=answered.model_dump(mode="json"),
+                    )
+                )
+            except Exception:
+                pass
+        return answered
+
+    def answer_question(
+        self,
+        user_id: str,
+        session_id: str,
+        run_id: UUID,
+        question_id: str,
+        answers: str | list[str],
+        idempotency_key: str,
+    ) -> QuestionRequest:
+        run = self.get_run(user_id, session_id, run_id)
+        if run.user_id != user_id or run.session_id != session_id:
+            raise QuestionOwnershipError(question_id)
+        return self.answer_question_for_job(run_id, question_id, answers, idempotency_key)
+
+    answer_question_owned = answer_question
+
+    def get_question(
+        self, user_id: str, session_id: str, run_id: UUID, question_id: str
+    ) -> QuestionRequest:
+        run = self.get_run(user_id, session_id, run_id)
+        if run.user_id != user_id or run.session_id != session_id:
+            raise QuestionOwnershipError(question_id)
+        return self.get_question_for_job(run_id, question_id)
+
+    def subscribe_question(
+        self, run_id: UUID, question_id: str, callback: Callable[[QuestionRequest], None]
+    ) -> Callable[[], None]:
+        run_ref = self._run_reference(run_id)
+        question_ref = run_ref.collection("questions").document(question_id)
+
+        def on_snapshot(documents: Any, _changes: Any, _read_time: Any) -> None:
+            snapshots = documents if isinstance(documents, list) else [documents]
+            for snapshot in snapshots:
+                payload = dict(snapshot.to_dict() or {})
+                if snapshot.exists and not is_expired(payload, self._now()):
+                    question = decode_question(payload)
+                    if question.state is QuestionState.ANSWERED:
+                        callback(question)
+
+        current = self.get_question_for_job(run_id, question_id)
+        if current.state is QuestionState.ANSWERED:
+            callback(current)
+        watch = question_ref.on_snapshot(on_snapshot)
+        return cast(Callable[[], None], watch.unsubscribe)
+
+    subscribe_question_answer = subscribe_question
 
     def update_session_summary(
         self,

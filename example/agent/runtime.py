@@ -10,6 +10,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 from cas_hosting_adapter.agent_adapter import ClaudeAgentAdapter
+from cas_hosting_adapter.errors import AgentQuestionTimeoutError
 from cas_hosting_adapter.firestore_chat_store import FirestoreChatStore
 from cas_hosting_adapter.google_adapters import GCSWorkspaceStore
 from cas_hosting_adapter.job_runner import JobInvocation, JobRunner
@@ -91,16 +92,54 @@ async def run() -> int:
                 relocate_claude_transcript(directories.claude_session, directories.workspace)
                 resume = previous.claude_session_id
                 LOGGER.info("job.session.resumed run_id=%s", invocation.run_id)
-            agent = ClaudeAgentAdapter(model=model)
-            state = await runner.persist_events(
-                invocation,
-                agent.events(
-                    prompt=prompt,
-                    workspace=directories.workspace,
-                    transcript_dir=directories.claude_session,
-                    resume=resume,
-                ),
+            agent = ClaudeAgentAdapter(
+                model=model,
+                question_store=store,
+                run_id=invocation.run_id,
+                question_timeout=float(os.environ["QUESTION_TIMEOUT_SECONDS"])
+                if os.environ.get("QUESTION_TIMEOUT_SECONDS")
+                else None,
             )
+            try:
+                state = await runner.persist_events(
+                    invocation,
+                    agent.events(
+                        prompt=prompt,
+                        workspace=directories.workspace,
+                        transcript_dir=directories.claude_session,
+                        resume=resume,
+                    ),
+                )
+            except AgentQuestionTimeoutError:
+                LOGGER.warning(
+                    "job.question_timeout run_id=%s timeout_seconds=%s",
+                    invocation.run_id,
+                    os.environ.get("QUESTION_TIMEOUT_SECONDS", "300"),
+                )
+                state = RunState.TIMED_OUT
+            if state is RunState.TIMED_OUT:
+                run = store.get_run_for_job(invocation.run_id)
+                paths = StoragePaths.for_session(
+                    user_id=run.user_id,
+                    session_id=run.session_id,
+                    schema_version=run.schema_version,
+                    sdk_version=version("claude-agent-sdk"),
+                )
+                snapshot, _manifest = create_workspace_snapshot(
+                    workspace_store,
+                    object_key=paths.snapshot_path(invocation.run_id),
+                    source=directories,
+                    run_id=invocation.run_id,
+                    sdk_version=version("claude-agent-sdk"),
+                    max_bytes=100 * 1024 * 1024,
+                )
+                state = runner.commit_unsuccessful(
+                    invocation,
+                    state,
+                    error_code="question_timeout",
+                    snapshot=snapshot,
+                    claude_session_id=runner.claude_session_id,
+                ).state
             if state.value == "running":
                 run = store.get_run_for_job(invocation.run_id)
                 paths = StoragePaths.for_session(
