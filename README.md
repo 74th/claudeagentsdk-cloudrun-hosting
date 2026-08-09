@@ -97,7 +97,7 @@ uv sync --group slack
 uv run python -m example.slackbot_frontend.app --release-config release.example.yaml
 ```
 
-Bot はイベントを即時 acknowledge し、バックグラウンドで run を開始します。team/channel/thread とアプリケーション user/session の対応は release config の named Firestore database 内へ保存されるため、再起動後も同じスレッドを継続できます。Slack event ID を idempotency key に使い、Bot 自身の投稿は無視します。
+Bot はイベントを即時 acknowledge し、バックグラウンドで run を開始します。処理中は同じステータスメッセージを作業内容と終端状態へ更新し、完了後は最終回答を新しいスレッド返信として投稿するため、Slack の通知を受け取れます。長い最終回答はSlackのメッセージ上限を超えないよう分割します。team/channel/thread とアプリケーション user/session の対応は release config の named Firestore database 内へ保存されるため、再起動後も同じスレッドを継続できます。Slack event ID を idempotency key に使い、Bot 自身の投稿は無視します。
 
 ### Job、再訪、キャンセル、障害確認
 

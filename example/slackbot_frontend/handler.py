@@ -160,9 +160,7 @@ class SlackMessageHandler:
             elif event.type == "unknown":
                 activity.append(f"イベント: {event.raw_type}")
             terminal = event.type in {"final", "terminal"}
-            message = self._compose_message(
-                activity, final_text or streamed_text, terminal_state
-            )
+            message = self._compose_message(activity, "", terminal_state)
             if message and (now - last_update >= self._update_interval or terminal):
                 self._update(client, response, message)
                 LOGGER.info("slack.reply.updated run_id=%s length=%d", run.id, len(message))
@@ -193,10 +191,20 @@ class SlackMessageHandler:
                 terminal_state = service.get_run(run.session_id, run.id).state.value
             except Exception:
                 LOGGER.debug("slack.run.state_unavailable run_id=%s", run.id)
-        message = self._compose_message(activity, final_text or streamed_text, terminal_state)
+        message = self._compose_message(activity, "", terminal_state)
         final_message = message or "処理が完了しました。"
         self._update(client, response, final_message)
         LOGGER.info("slack.reply.updated run_id=%s length=%d", run.id, len(final_message))
+        answer = final_text or streamed_text
+        if answer.strip():
+            for part_number, part in enumerate(self._split_text(f"最終結果:\n{answer}"), 1):
+                self._post(client, key, part)
+                LOGGER.info(
+                    "slack.final.reply.posted run_id=%s part=%d length=%d",
+                    run.id,
+                    part_number,
+                    len(part),
+                )
 
     @staticmethod
     def _compose_message(
@@ -223,6 +231,21 @@ class SlackMessageHandler:
         if limit <= 1:
             return "…"[:limit]
         return text[: limit - 1] + "…"
+
+    @staticmethod
+    def _split_text(text: str) -> list[str]:
+        """Slack の安全なサイズで改行を優先して分割する。"""
+        parts: list[str] = []
+        remaining = text
+        while len(remaining) > MAX_SLACK_TEXT_LENGTH:
+            boundary = remaining.rfind("\n", 0, MAX_SLACK_TEXT_LENGTH)
+            if boundary < MAX_SLACK_TEXT_LENGTH // 2:
+                boundary = MAX_SLACK_TEXT_LENGTH
+            parts.append(remaining[:boundary])
+            remaining = remaining[boundary:].lstrip("\n")
+        if remaining:
+            parts.append(remaining)
+        return parts or [""]
 
     def _post(self, client: Any, key: SlackThreadKey, text: str) -> Any:
         return self._call_with_retry(

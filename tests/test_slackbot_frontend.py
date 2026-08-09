@@ -101,10 +101,11 @@ def test_slack_handler_acknowledges_immediately_and_continues_thread() -> None:
     assert ack_calls == ["ack", "ack"]
     assert calls[0][1] is None
     assert calls[1][1] == "session-1"
-    assert len(client.posts) == 2
+    assert len(client.posts) == 4
     assert all(post["thread_ts"] == "1.0" for post in client.posts)
     assert client.updates
-    assert "最終結果:\n応答" in client.updates[-1]["text"]
+    assert "実行終了" not in client.updates[-1]["text"]
+    assert any("最終結果:\n応答" in post["text"] for post in client.posts)
     key = SlackThreadKey("T-team", "C-channel", "1.0")
     binding = store.get(key)
     assert binding is not None
