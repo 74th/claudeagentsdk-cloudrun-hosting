@@ -206,6 +206,9 @@ class ChatService:
     def events(self, run_id: UUID) -> list[ChatEvent]:
         return self._client.list_events(run_id)
 
+    def latest_event(self, run_id: UUID) -> ChatEvent | None:
+        return self._client.latest_event(run_id)
+
     def pending_questions(self, session_id: str, run_id: UUID) -> list[QuestionRequest]:
         """Return only questions visible inside this user's active run."""
         return [

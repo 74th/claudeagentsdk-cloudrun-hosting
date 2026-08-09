@@ -470,6 +470,27 @@ class FirestoreChatStore:
                 events.append(event)
         return sorted(events, key=lambda event: (event.sequence, event.id))
 
+    def latest_event(self, run_id: UUID) -> ChatEvent | None:
+        query = self._client.collection_group("runs").where("id", "==", str(run_id)).limit(1)
+        found = list(query.stream())
+        if not found:
+            raise SessionNotFoundError("run was not found")
+        snapshots = list(
+            found[0]
+            .reference.collection("events")
+            .order_by("sequence", direction="DESCENDING")
+            .limit(1)
+            .stream()
+        )
+        if not snapshots:
+            return None
+        payload = dict(snapshots[0].to_dict())
+        if is_expired(payload, self._now()):
+            return None
+        payload.pop("schema_version", None)
+        payload.pop("expires_at", None)
+        return ChatEvent.model_validate(payload)
+
     def subscribe(
         self, run_id: UUID, cursor: str | None, callback: Callable[[ChatEvent], None]
     ) -> Callable[[], None]:

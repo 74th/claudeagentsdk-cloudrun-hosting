@@ -248,6 +248,13 @@ class InMemoryChatStore:
             return events
         return [event for event in events if event.id > cursor]
 
+    def latest_event(self, run_id: UUID) -> ChatEvent | None:
+        with self._lock:
+            events = self.events.get(run_id, {})
+            if not events:
+                return None
+            return max(events.values(), key=lambda event: (event.sequence, event.id))
+
     def subscribe(
         self, run_id: UUID, cursor: str | None, callback: Callable[[ChatEvent], None]
     ) -> Callable[[], None]:

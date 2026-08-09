@@ -121,6 +121,9 @@ class ControlClient:
     def list_events(self, run_id: UUID, *, cursor: str | None = None) -> list[ChatEvent]:
         return self._chat_store.list_events(run_id, cursor=cursor)
 
+    def latest_event(self, run_id: UUID) -> ChatEvent | None:
+        return self._chat_store.latest_event(run_id)
+
     def subscribe(
         self, run_id: UUID, cursor: str | None, callback: Callable[[ChatEvent], None]
     ) -> Callable[[], None]:
