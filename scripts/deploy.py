@@ -17,6 +17,7 @@ def main() -> int:
     args = parser.parse_args()
     config = load_release_config(args.config)
     variables = config.terraform_variables()
+    print(f"execution_platform={config.execution_platform}")
     print(
         f"retention_days={config.retention_days}; "
         "targets=Firestore sessions/runs/events and all GCS objects "

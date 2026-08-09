@@ -2,6 +2,7 @@ README.md
 pyproject.toml
 cas_hosting_adapter/__init__.py
 cas_hosting_adapter/agent_adapter.py
+cas_hosting_adapter/batch_backend.py
 cas_hosting_adapter/cloud_run_backend.py
 cas_hosting_adapter/control_client.py
 cas_hosting_adapter/errors.py

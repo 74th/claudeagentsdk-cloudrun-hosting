@@ -11,7 +11,11 @@ provider "google" {
 }
 
 resource "google_project_service" "required" {
-  for_each           = toset(["run.googleapis.com", "firestore.googleapis.com", "storage.googleapis.com", "artifactregistry.googleapis.com", "aiplatform.googleapis.com"])
+  for_each = toset(concat(
+    ["firestore.googleapis.com", "storage.googleapis.com", "artifactregistry.googleapis.com", "aiplatform.googleapis.com"],
+    var.enable_cloud_run ? ["run.googleapis.com"] : [],
+    var.enable_cloud_batch ? ["batch.googleapis.com"] : []
+  ))
   project            = var.project_id
   service            = each.value
   disable_on_destroy = false
@@ -161,8 +165,10 @@ resource "google_firestore_index" "chat_events_by_sequence" {
 }
 
 resource "google_cloud_run_v2_job" "agent" {
-  name     = var.job_name
-  location = var.region
+  count               = var.enable_cloud_run ? 1 : 0
+  name                = var.job_name
+  deletion_protection = false
+  location            = var.region
   template {
     template {
       max_retries     = 0
@@ -214,13 +220,31 @@ resource "google_cloud_run_v2_job" "agent" {
   depends_on = [google_project_service.required]
 }
 
+# Batch jobs are created per run by CloudBatchBackend. Terraform manages the
+# API, service identities, and shared data plane rather than a static Job.
+
 resource "google_service_account" "control" { account_id = "claude-control" }
 resource "google_service_account" "job" { account_id = "claude-job" }
 
 resource "google_project_iam_member" "control_run_developer" {
+  count   = var.enable_cloud_run ? 1 : 0
   project = var.project_id
   role    = "roles/run.developer"
   member  = "serviceAccount:${google_service_account.control.email}"
+}
+
+resource "google_project_iam_member" "control_batch_jobs_editor" {
+  count   = var.enable_cloud_batch ? 1 : 0
+  project = var.project_id
+  role    = "roles/batch.jobsEditor"
+  member  = "serviceAccount:${google_service_account.control.email}"
+}
+
+resource "google_service_account_iam_member" "control_batch_job_user" {
+  count              = var.enable_cloud_batch ? 1 : 0
+  service_account_id = google_service_account.job.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.control.email}"
 }
 
 resource "google_project_iam_member" "control_firestore" {
@@ -253,4 +277,9 @@ resource "google_storage_bucket_iam_member" "job_workspace" {
   bucket = google_storage_bucket.workspace.name
   role   = "roles/storage.objectUser"
   member = "serviceAccount:${google_service_account.job.email}"
+}
+
+moved {
+  from = google_cloud_run_v2_job.agent
+  to   = google_cloud_run_v2_job.agent[0]
 }

@@ -1,4 +1,23 @@
 variable "project_id" { type = string }
+variable "execution_platform" {
+  type        = string
+  description = "Runtime backend metadata; resource creation is controlled by enable flags."
+  default     = "cloud-run"
+  validation {
+    condition     = contains(["cloud-run", "cloud-batch"], var.execution_platform)
+    error_message = "execution_platform must be cloud-run or cloud-batch; gke is reserved."
+  }
+}
+variable "enable_cloud_run" {
+  type        = bool
+  description = "Keep Cloud Run API, Job, and Cloud Run IAM available."
+  default     = true
+}
+variable "enable_cloud_batch" {
+  type        = bool
+  description = "Keep Cloud Batch API and Batch IAM available."
+  default     = true
+}
 variable "region" {
   type    = string
   default = "us-central1"
@@ -20,10 +39,43 @@ variable "job_name" {
   type    = string
   default = "test-claudesdk-cloudrun"
 }
+variable "batch_job_id_prefix" {
+  type        = string
+  description = "Prefix for deterministic per-run Cloud Batch Job IDs."
+  default     = "claude-agent"
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{0,24}$", var.batch_job_id_prefix))
+    error_message = "batch_job_id_prefix must start with a lowercase letter and be at most 25 characters."
+  }
+}
+variable "batch_machine_type" {
+  type    = string
+  default = "e2-standard-2"
+}
+variable "batch_cpu_milli" {
+  type    = number
+  default = 2000
+  validation {
+    condition     = var.batch_cpu_milli >= 1
+    error_message = "batch_cpu_milli must be positive."
+  }
+}
+variable "batch_memory_mib" {
+  type    = number
+  default = 4096
+  validation {
+    condition     = var.batch_memory_mib >= 1
+    error_message = "batch_memory_mib must be positive."
+  }
+}
 variable "image" { type = string }
 variable "task_timeout_seconds" {
   type    = number
   default = 1800
+  validation {
+    condition     = var.task_timeout_seconds >= 1 && var.task_timeout_seconds <= 86400
+    error_message = "task_timeout_seconds must be between 1 and 86400 seconds."
+  }
 }
 variable "vertex_region" {
   type        = string

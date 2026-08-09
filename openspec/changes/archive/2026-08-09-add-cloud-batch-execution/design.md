@@ -45,17 +45,17 @@ Batch の作成待ち／キュー／スケジュール状態は `pending`、実�
 
 既存 schema version 2 で暗黙に Cloud Run を選ぶ方法は移行が容易だが、設定の意味が schema 間で曖昧になるため採用しない。移行時に Cloud Run を明示させ、未知／混在フィールドを早期拒否する。
 
-### 5. Terraformは条件付きリソースと条件付きIAMを用いる
+### 5. Terraform は enable flag と YAML の runtime 選択を分離する
 
-Terraform 変数 `execution_platform` は実装済みの `cloud-run`／`cloud-batch` だけを適用可能とし、Cloud Run Job と Cloud Run 制御 IAM は前者でのみ作る。Batch API、有効化後の Batch 制御 IAM、ジョブサービスアカウント利用権限は後者でのみ作る。Firestore、GCS、Artifact Registry、ジョブ実行サービスアカウントとそのデータ／Vertex AI 権限は共通リソースとして維持する。
+Terraform 変数 `enable_cloud_run` と `enable_cloud_batch` は、各基盤の API、実行リソース、専用 IAM を管理する独立した enable flag とする。検証環境の既定値は両方 `true` とし、1つ以上を有効にする。release YAML の `execution_platform` は composition root が使用する backend だけを選び、Terraform のリソース作成条件には使わない。選択した platform が無効な場合は release 設定検証で拒否する。Firestore、GCS、Artifact Registry、ジョブ実行サービスアカウントとそのデータ／Vertex AI 権限は共通リソースとして維持する。
 
-単一モジュール内の `count`／`for_each` による条件分岐を採用し、当面は同じ state で排他的な切替を表現する。基盤ごとに Terraform root を複製する案は共通データ基盤の drift と切替時の state 移行を増やすため採用しない。GKE は実装時に専用 module と必要な network／cluster 入力を追加する。
+単一モジュール内の `count`／`for_each` による条件分岐を enable flag に適用し、同じ state で両基盤を保持できるようにする。platform の切替では Terraform apply を要求せず、YAML と control client の変更だけで実行先を変える。基盤ごとに Terraform root を複製する案は共通データ基盤の drift を増やすため採用しない。GKE は実装時に専用 module と必要な network／cluster 入力を追加する。
 
 ## Risks / Trade-offs
 
 - [Batch Job の削除後は API から終端理由を照会できない] → Firestore の cancel request／終端状態を正本にし、reconciler が確定するまで自動削除しない。
 - [Cloud Run と Batch で状態遷移やエラー理由が完全には一致しない] → 共通の有限状態とドメインエラーに明示写像し、SDK の未知状態は成功ではなく安全側の一時エラーとして扱う。
-- [条件付き Terraform resource の導入で既存 address が変わる可能性がある] → `moved` block または state migration 手順を用意し、plan で Firestore／GCS の置換がないことを切替前に確認する。
+- [enable flag の導入で既存 address が変わる可能性がある] → `moved` block または state migration 手順を用意し、enable flag の変更 plan で Firestore／GCS の置換がないことを確認する。
 - [Batch の machine type／CPU／memory の組み合わせが region 在庫に依存する] → 設定レベルの構文検証と API エラー分類を行い、example は一般的な構成を採用する。
 - [制御主体へサービスアカウント利用権限が必要になる] → 対象をジョブ実行サービスアカウント単体へ限定し、プロジェクト全体の Service Account User を付与しない。
 
@@ -63,8 +63,8 @@ Terraform 変数 `execution_platform` は実装済みの `cloud-run`／`cloud-ba
 
 1. 新 release schema と Cloud Run 明示設定を先に導入し、既存 Cloud Run plan が実質的に同一であることを確認する。
 2. Batch adapter と状態／エラー変換を fake client による契約テストで追加する。
-3. Terraform の条件分岐、Batch API／IAM、Batch example を追加し、両基盤の validate／plan を取得する。
+3. Terraform の enable flag、両 API／IAM、Batch example を追加し、両基盤を有効化した validate／plan を取得する。
 4. テスト環境で Batch 設定を plan し、Firestore と GCS が置換されないことを確認して適用する。
 5. Batch で run の開始、イベント永続化、完了、失敗、キャンセル、重複開始を確認してから制御側設定を切り替える。
 
-ロールバックは `execution_platform: cloud-run` に戻して再適用し、Cloud Run adapter を選択する。Firestore と GCS は共通 resource address を維持し、切替やロールバックで削除しない。切替時点で active な Batch run は移送せず、完了または明示キャンセル後に切り替える。
+ロールバックは `execution_platform: cloud-run` の YAML に戻して control client を切り替える。両基盤を有効化した検証環境では Terraform apply は不要である。Firestore と GCS は共通 resource address を維持し、切替やロールバックで削除しない。切替時点で active な run は移送せず、完了または明示キャンセル後に切り替える。

@@ -172,8 +172,19 @@ class ControlClient:
             self._chat_store.release_reconciliation_lease(run_id, holder)
             return run
         except ExecutionNotFoundError:
+            cancelled = run.state is RunState.CANCEL_REQUESTED
             result = self._chat_store.reconcile_terminal(
-                run_id, holder, RunState.FAILED, error_code="cloud_run_execution_not_found"
+                run_id,
+                holder,
+                RunState.CANCELLED if cancelled else RunState.FAILED,
+                error_code=(
+                    "execution_cancelled_after_deletion"
+                    if cancelled
+                    else (
+                        f"{getattr(self._execution_backend, 'backend_name', 'cloud_run')}_"
+                        "execution_not_found"
+                    )
+                ),
             )
             self._chat_store.release_reconciliation_lease(run_id, holder)
             return result

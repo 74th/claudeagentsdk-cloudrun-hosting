@@ -19,6 +19,7 @@ from .models import ExecutionReference, ExecutionState
 
 
 class CloudRunJobsBackend:
+    backend_name = "cloud_run"
     def __init__(
         self, jobs: Any, executions: Any, *, project: str, region: str, job_name: str
     ) -> None:
@@ -113,6 +114,7 @@ class CloudRunJobsBackend:
             raise
 
     def get(self, reference: ExecutionReference) -> ExecutionState:
+        self._validate_reference(reference)
         try:
             if "/operations/" in reference.name:
                 operation = self._jobs.transport.operations_client.get_operation(reference.name)
@@ -127,6 +129,7 @@ class CloudRunJobsBackend:
             raise _map_execution_error(error, "Cloud Run Execution get failed") from error
 
     def cancel(self, reference: ExecutionReference) -> ExecutionState:
+        self._validate_reference(reference)
         if "/operations/" in reference.name:
             try:
                 self._jobs.transport.operations_client.cancel_operation(reference.name)
@@ -141,6 +144,13 @@ class CloudRunJobsBackend:
             return ExecutionState.CANCELLED
         except Exception as error:
             raise _map_execution_error(error, "Cloud Run Execution cancel failed") from error
+
+    @staticmethod
+    def _validate_reference(reference: ExecutionReference) -> None:
+        if reference.backend != "cloud-run-jobs":
+            raise ValidationError(
+                "Cloud Run Jobs backend received an execution reference for another backend"
+            )
 
 
 def normalize_execution_conditions(conditions: Any) -> ExecutionState:

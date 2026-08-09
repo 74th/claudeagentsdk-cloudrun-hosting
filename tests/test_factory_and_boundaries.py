@@ -2,7 +2,25 @@ from pathlib import Path
 
 import pytest
 
-from cas_hosting_adapter.factory import GoogleCloudSettings
+import cas_hosting_adapter.factory as factory
+from cas_hosting_adapter.batch_backend import CloudBatchBackend
+from cas_hosting_adapter.cloud_run_backend import CloudRunJobsBackend
+from cas_hosting_adapter.factory import GoogleCloudClients, GoogleCloudSettings
+
+
+class FakeBatchClient:
+    def create_job(self, **kwargs: object) -> object:
+        return object()
+
+    def get_job(self, **kwargs: object) -> object:
+        return object()
+
+    def delete_job(self, **kwargs: object) -> object:
+        return object()
+
+
+class FakeChatStore:
+    pass
 
 
 def test_google_cloud_settings_rejects_cross_region_job_name() -> None:
@@ -17,3 +35,33 @@ def test_core_public_modules_do_not_import_google_sdks() -> None:
     root = Path("cas_hosting_adapter")
     for path in (root / "models.py", root / "lifecycle.py", root / "control_client.py"):
         assert "google.cloud" not in path.read_text()
+
+
+@pytest.mark.parametrize("platform", ["cloud-run", "cloud-batch"])
+def test_factory_injects_only_the_selected_execution_backend(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    settings = GoogleCloudSettings(
+        project="project",
+        region="us-central1",
+        firestore_database="claude-agent-chat",
+        bucket_name="bucket",
+        execution_platform=platform,  # type: ignore[arg-type]
+        image="image",
+    )
+    clients = GoogleCloudClients(
+        firestore=object(),
+        storage=object(),
+        jobs=object(),
+        executions=object(),
+        batch=FakeBatchClient(),
+    )
+    monkeypatch.setattr(factory, "create_google_cloud_clients", lambda _: clients)
+    monkeypatch.setattr(factory, "FirestoreChatStore", lambda *args, **kwargs: FakeChatStore())
+
+    client = factory.create_google_cloud_control_client(settings)
+    backend = client._execution_backend
+    if platform == "cloud-run":
+        assert isinstance(backend, CloudRunJobsBackend)
+    else:
+        assert isinstance(backend, CloudBatchBackend)

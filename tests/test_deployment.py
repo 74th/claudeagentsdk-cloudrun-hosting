@@ -24,9 +24,15 @@ def test_terraform_has_required_deployment_safeguards() -> None:
 
 def test_release_config_rejects_unknown_and_unsafe_job_values() -> None:
     with pytest.raises(Exception):
-        ReleaseConfig(project_id="p", region="us-central1", firestore_location="us-central1",
-                      firestore_database="claude-agent-chat", bucket_name="b", image="i", task_retries=1)
+        ReleaseConfig(
+            project_id="p", region="us-central1", firestore_location="us-central1",
+            firestore_database="claude-agent-chat", bucket_name="b", image="i", task_retries=1,
+        )
     with pytest.raises(Exception):
-        ReleaseConfig.model_validate({"project_id": "p", "region": "us-central1",
-                                      "firestore_location": "us-central1", "bucket_name": "b",
-                                      "firestore_database": "claude-agent-chat", "image": "i", "token": "forbidden"})
+        ReleaseConfig.model_validate(
+            {
+                "project_id": "p", "region": "us-central1",
+                "firestore_location": "us-central1", "bucket_name": "b",
+                "firestore_database": "claude-agent-chat", "image": "i", "token": "forbidden",
+            }
+        )

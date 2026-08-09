@@ -7,7 +7,7 @@ from cas_hosting_adapter.release_config import ReleaseConfig, load_release_confi
 
 def test_example_release_config_is_valid() -> None:
     config = load_release_config(Path("release.example.yaml"))
-    assert config.schema_version == "2"
+    assert config.schema_version == "3"
     assert config.retention_days == 30
     assert config.terraform_variables()["job_name"] == "test-claudesdk-cloudrun"
     assert config.terraform_variables()["firestore_database"] == "claude-agent-chat"
@@ -54,3 +54,48 @@ def test_release_config_rejects_default_or_invalid_firestore_database(database: 
     with pytest.raises(ValueError):
         ReleaseConfig(project_id="p", region="us-central1", firestore_location="us-central1",
                       firestore_database=database, bucket_name="bucket", image="image")
+
+
+def test_release_config_rejects_unsupported_platform_and_mixed_settings() -> None:
+    common = {
+        "project_id": "p",
+        "region": "us-central1",
+        "firestore_location": "us-central1",
+        "firestore_database": "claude-agent-chat",
+        "bucket_name": "bucket",
+        "image": "image",
+        "schema_version": "3",
+    }
+    with pytest.raises(ValueError, match="not implemented"):
+        ReleaseConfig(**common, execution_platform="gke")
+    with pytest.raises(ValueError, match="must not contain"):
+        ReleaseConfig(**common, execution_platform="cloud-batch", job_name="run")
+
+
+def test_release_config_keeps_both_terraform_platforms_enabled_by_default() -> None:
+    config = ReleaseConfig(
+        project_id="p",
+        region="us-central1",
+        firestore_location="us-central1",
+        firestore_database="claude-agent-chat",
+        bucket_name="bucket",
+        image="image",
+        execution_platform="cloud-batch",
+    )
+    variables = config.terraform_variables()
+    assert variables["enable_cloud_run"] is True
+    assert variables["enable_cloud_batch"] is True
+
+
+def test_release_config_rejects_runtime_platform_when_disabled() -> None:
+    with pytest.raises(ValueError, match="requires enable_cloud_batch"):
+        ReleaseConfig(
+            project_id="p",
+            region="us-central1",
+            firestore_location="us-central1",
+            firestore_database="claude-agent-chat",
+            bucket_name="bucket",
+            image="image",
+            execution_platform="cloud-batch",
+            enable_cloud_batch=False,
+        )

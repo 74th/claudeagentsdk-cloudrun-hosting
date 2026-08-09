@@ -1,34 +1,34 @@
 ## MODIFIED Requirements
 
 ### Requirement: 必要なGoogle Cloud基盤をTerraformで構築する
-Terraform 構成は選択した実行基盤に応じて Cloud Run Job または Google Cloud Batch の実行基盤を構成し、どちらの場合も Firestore database と必要な index、GCS bucket、Artifact Registry、サービスアカウント、IAM を作成または参照しなければならない（SHALL）。非選択側の実行リソースおよび専用 IAM を作成してはならない（MUST NOT）。
+Terraform 構成は `enable_cloud_run`／`enable_cloud_batch` に応じて Cloud Run Job と Google Cloud Batch の実行基盤を構成し、どちらを有効化した場合も Firestore database と必要な index、GCS bucket、Artifact Registry、サービスアカウント、共通 IAM を作成または参照しなければならない（SHALL）。無効化した側の実行リソースおよび専用 IAM は作成してはならない（MUST NOT）。release YAML の `execution_platform` は runtime backend を選択するが、Terraform の enable flag を暗黙に変更してはならない。
 
 #### Scenario: 新規環境へ適用する
-- **WHEN** 利用者が実装済み実行基盤を1つ選択した有効な環境設定で Terraform を適用する
-- **THEN** 選択したジョブ実行基盤と、チャット制御およびジョブ実行に必要な共通 Google Cloud リソースが同じ設定に基づいて構築される
+- **WHEN** 利用者が1つ以上の実行基盤を enable した有効な環境設定で Terraform を適用する
+- **THEN** enable したジョブ実行基盤と、チャット制御およびジョブ実行に必要な共通 Google Cloud リソースが同じ設定に基づいて構築される
 
 #### Scenario: Cloud Run環境へ適用する
-- **WHEN** 利用者が実行基盤 `cloud-run` を指定した有効な環境設定で Terraform を適用する
-- **THEN** Cloud Run Job と、チャット制御およびジョブ実行に必要な共通 Google Cloud リソースが構築され、Batch 専用 IAM は構築されない
+- **WHEN** 利用者が `enable_cloud_run=true` の環境設定で Terraform を適用する
+- **THEN** Cloud Run Job と Cloud Run 専用 IAM、および共通 Google Cloud リソースが構築される
 
 #### Scenario: Cloud Batch環境へ適用する
-- **WHEN** 利用者が実行基盤 `cloud-batch` を指定した有効な環境設定で Terraform を適用する
-- **THEN** Batch API と Batch Job の起動に必要な IAM、およびチャット制御とジョブ実行に必要な共通 Google Cloud リソースが構築され、Cloud Run Job は構築されない
+- **WHEN** 利用者が `enable_cloud_batch=true` の環境設定で Terraform を適用する
+- **THEN** Batch API と Batch Job の起動に必要な IAM、および共通 Google Cloud リソースが構築される
 
 ### Requirement: 制御主体とジョブ実行主体を分離する
 デプロイ構成は選択した実行基盤でジョブを開始・照会・キャンセルする制御主体と、Firestore および対象 GCS 名前空間へアクセスするジョブ実行主体を分離し、それぞれへ選択した実行基盤に必要な最小限の権限だけを付与しなければならない（SHALL）。
 
 #### Scenario: IAM設定を検査する
 - **WHEN** 選択した実行基盤の Terraform plan で IAM binding を確認する
-- **THEN** 制御主体とジョブ実行主体にプロジェクト全体の広域管理者権限が付与されず、非選択の実行基盤を操作する権限も付与されていない
+- **THEN** 制御主体とジョブ実行主体にプロジェクト全体の広域管理者権限が付与されず、無効化した実行基盤を操作する権限も付与されていない
 
 #### Scenario: Cloud RunのIAM設定を検査する
-- **WHEN** 実行基盤 `cloud-run` の Terraform plan で IAM binding を確認する
-- **THEN** 制御主体は Cloud Run Job の操作権限だけを持ち、制御主体とジョブ実行主体にプロジェクト全体の広域管理者権限が付与されていない
+- **WHEN** `enable_cloud_run=true` の Terraform plan で IAM binding を確認する
+- **THEN** 制御主体は Cloud Run Job の操作権限を持ち、制御主体とジョブ実行主体にプロジェクト全体の広域管理者権限が付与されていない
 
 #### Scenario: Cloud BatchのIAM設定を検査する
-- **WHEN** 実行基盤 `cloud-batch` の Terraform plan で IAM binding を確認する
-- **THEN** 制御主体は Batch Job の操作と指定したジョブ実行サービスアカウントの利用に必要な権限だけを持ち、Cloud Run 操作権限および広域管理者権限が付与されていない
+- **WHEN** `enable_cloud_batch=true` の Terraform plan で IAM binding を確認する
+- **THEN** 制御主体は Batch Job の操作と指定したジョブ実行サービスアカウントの利用に必要な権限を持ち、広域管理者権限が付与されていない
 
 ### Requirement: バージョン付きリリース設定を検証する
 システムは project、region、container image、実行基盤、実行基盤別ジョブ設定、Firestore database名、GCS、サービスアカウント、実行制限を version 付き設定で管理し、未知の項目、不正な組み合わせ、未対応 schema version または未実装の実行基盤をクラウド変更前に拒否しなければならない（SHALL）。Firestore database名は空文字列および `(default)` を許可してはならない（MUST NOT）。
@@ -69,12 +69,12 @@ Terraform 構成は選択した実行基盤に応じて Cloud Run Job または 
 - **WHEN** 利用者が実行基盤 `cloud-batch` の検証済みリリース設定で run を開始する
 - **THEN** 制御側は指定された image、計算資源、timeout、サービスアカウント、共通の Firestore／GCS 設定、run ID を持つ 1 task の Batch Job を作成する
 
-### Requirement: 実行基盤を排他的に選択する
-リリース設定と Terraform は 1 回の配備につき実装済み実行基盤を正確に 1 つ選択し、制御側のバックエンド種別と配備された権限／リソースを一致させなければならない（SHALL）。実行基盤を省略した既存 schema version 2 設定は Cloud Run として移行可能でなければならない（SHALL）。
+### Requirement: runtime backend と Terraform enable を分離する
+リリース設定は `execution_platform` で実行 backend を正確に 1 つ選択し、Terraform は `enable_cloud_run`／`enable_cloud_batch` で利用可能な基盤を独立して管理しなければならない（SHALL）。選択した runtime backend が Terraform で無効な場合、設定検証は cloud change 前に失敗しなければならない（SHALL）。実行基盤を省略した既存 schema version 2 設定は Cloud Run として移行可能でなければならない（SHALL）。
 
-#### Scenario: Cloud RunからCloud Batchへ切り替える
-- **WHEN** 利用者が検証済み設定の実行基盤を `cloud-run` から `cloud-batch` へ変更して plan を作成する
-- **THEN** plan は Cloud Run Job と専用 IAM の除去、および Batch 専用 IAM の追加を明示し、Firestore database と GCS bucket の保存データを置換しない
+#### Scenario: YAMLだけでCloud RunからCloud Batchへ切り替える
+- **WHEN** `enable_cloud_run=true` と `enable_cloud_batch=true` の Terraform 適用後、利用者が YAML の `execution_platform` を `cloud-run` から `cloud-batch` へ変更する
+- **THEN** Terraform apply なしに composition root は Batch backend を選択し、Firestore database と GCS bucket は同じ保存データを利用する
 
 #### Scenario: 旧設定を移行する
 - **WHEN** 実行基盤項目を持たない schema version 2 の設定を新 schema へ更新する

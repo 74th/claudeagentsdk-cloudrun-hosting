@@ -15,7 +15,9 @@ def test_firestore_session_run_claim_and_event_contract() -> None:
     project = os.environ.get("CAS_HOSTING_FIRESTORE_TEST_PROJECT")
     database = os.environ.get("CAS_HOSTING_FIRESTORE_TEST_DATABASE")
     if not project or not database:
-        pytest.skip("set CAS_HOSTING_FIRESTORE_TEST_PROJECT and CAS_HOSTING_FIRESTORE_TEST_DATABASE")
+        pytest.skip(
+            "set CAS_HOSTING_FIRESTORE_TEST_PROJECT and CAS_HOSTING_FIRESTORE_TEST_DATABASE"
+        )
     from google.cloud import firestore
 
     store = FirestoreChatStore(firestore.Client(project=project, database=database))

@@ -15,6 +15,31 @@ terraform -chdir=terraform validate
 python scripts/deploy.py release.example.yaml
 ```
 
+## Cloud Batch へ切り替える
+
+Terraform は検証用に Cloud Run と Cloud Batch を両方有効化します。`release.batch.example.yaml` をコピーし、`image` を実際の digest に置き換えて設定ファイルを差し替えるだけで Batch backend を選択できます。秘密情報は release 設定へ記述しません。基盤を無効化したい場合だけ `enable_cloud_run` / `enable_cloud_batch` を変更して Terraform を再適用します。
+
+```bash
+uv run python scripts/deploy.py release.batch.example.yaml
+uv run python scripts/deploy.py release.batch.example.yaml --apply
+```
+
+`release.example.yaml` に戻すと Cloud Run backend に戻ります。両方の enable flag が true の間はこの切替に Terraform apply は不要です。
+
+Cloud Batch は 1 run を 1 Job として作成し、コンテナへは `RUN_ID` と Firestore／GCS／Vertex AI の非秘密設定だけを渡します。Job の状態は Firestore の run と Cloud Batch の Job を確認します。
+
+```bash
+gcloud batch jobs list --location=us-central1 --project=nnyn-dev
+gcloud logging read \
+  'resource.type="batch_job"' --project=nnyn-dev --limit=100
+```
+
+実行中の run は UI の Cancel または `ControlClient.cancel(run_id)` でキャンセルします。Batch Job の削除要求後、Firestore の cancel request と Job 消失を reconciler が終端状態へ確定します。重複した開始要求は run ID から同じ Job ID へ収束します。
+
+Cloud Run と Batch の切替前には、両方の変数で refresh なしの plan を取得し、`google_firestore_database.chat` と `google_storage_bucket.workspace` に `-/+` や destroy がないことを確認します。active な run は完了またはキャンセルしてから切り替えてください。ロールバックは `execution_platform: cloud-run` と `cloud_run.job_name` を指定した設定へ戻して plan／apply します。Firestore database と GCS bucket は共通 resource address のため削除しません。
+
+`gke` は将来の予約値として認識しますが、今回の実装・example・Terraform 適用対象外です。指定するとクラウド変更前の設定検証で失敗します。
+
 Cloud Run Job image は `example/Dockerfile` で build し、release 設定の image を更新して配備します。`release.example.yaml` は名前付き Firestore database `claude-agent-chat` を作成・利用します。Job は `RUN_ID` だけを受け取り、入力・イベント・cancel flag は Firestore から取得します。Streamlit sample は同じ release 設定（テスト環境は `nnyn-dev`）を接続設定として使用します。ローカル ADC を準備してから起動してください。
 
 この構成はプロジェクトの `(default)` database を作成・利用・変更しません。また、既存の `(default)` 内データを `claude-agent-chat` へ自動移行しません。既存データが必要な場合は、別途承認した移行手順を実施してください。

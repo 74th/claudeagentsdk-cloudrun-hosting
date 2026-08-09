@@ -1,5 +1,6 @@
 """Static deployment guardrails in addition to terraform validate."""
 
+import re
 from pathlib import Path
 
 
@@ -17,6 +18,11 @@ def validate(path: Path) -> None:
         "FIRESTORE_DATABASE",
         "google_firestore_database.chat.name",
         "var.firestore_database",
+        "batch.googleapis.com",
+        "roles/batch.jobsEditor",
+        "roles/iam.serviceAccountUser",
+        "enable_cloud_run",
+        "enable_cloud_batch",
     )
     missing = [value for value in required if value not in text]
     if missing:
@@ -34,3 +40,9 @@ def validate(path: Path) -> None:
         raise ValueError("GCS must have one unscoped retention lifecycle rule")
     if "condition { age = var.retention_days }" not in text:
         raise ValueError("GCS lifecycle must use retention_days for every object")
+    if not re.search(r"count\s*=\s*var\.enable_cloud_run \? 1 : 0", text):
+        raise ValueError("Cloud Run resources must be conditional on enable_cloud_run")
+    if not re.search(r"count\s*=\s*var\.enable_cloud_batch \? 1 : 0", text):
+        raise ValueError("Batch IAM must be conditional on enable_cloud_batch")
+    if text.count("max_retries     = 0") != 1:
+        raise ValueError("Cloud Run task retries must remain zero")
