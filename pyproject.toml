@@ -30,9 +30,12 @@ dev = [
 streamlit = [
   "streamlit==1.59.2",
 ]
+slack = [
+  "slack-bolt==1.27.0",
+]
 
 [tool.setuptools.packages.find]
-include = ["cas_hosting_adapter*", "example*", "sample_frontend*", "scripts*"]
+include = ["cas_hosting_adapter*", "example*", "scripts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

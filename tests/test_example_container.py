@@ -10,7 +10,7 @@ def test_job_dockerfile_uses_non_root_job_entrypoint() -> None:
 
 
 def test_job_entrypoint_accepts_only_durable_run_environment() -> None:
-    source = Path("example/agent.py").read_text()
+    source = Path("example/agent/runtime.py").read_text()
     assert "JobInvocation.from_environment" in source
     assert "request_directories" in source
     assert "WORKSPACE_BUCKET" in source

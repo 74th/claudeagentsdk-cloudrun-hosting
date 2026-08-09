@@ -40,7 +40,7 @@ Cloud Run と Batch の切替前には、両方の変数で refresh なしの pl
 
 `gke` は将来の予約値として認識しますが、今回の実装・example・Terraform 適用対象外です。指定するとクラウド変更前の設定検証で失敗します。
 
-Cloud Run Job image は `example/Dockerfile` で build し、release 設定の image を更新して配備します。`release.example.yaml` は名前付き Firestore database `claude-agent-chat` を作成・利用します。Job は `RUN_ID` だけを受け取り、入力・イベント・cancel flag は Firestore から取得します。Streamlit sample は同じ release 設定（テスト環境は `nnyn-dev`）を接続設定として使用します。ローカル ADC を準備してから起動してください。
+Cloud Run Job image は `example/Dockerfile` で build し、release 設定の image を更新して配備します。Job は `RUN_ID` だけを受け取り、入力・イベント・cancel flag は Firestore から取得します。サンプルは `example/agent`、`example/streamlit_frontend`、`example/slackbot_frontend` に分離されています。旧 `example/agent.py` と `sample_frontend` は廃止しました。
 
 この構成はプロジェクトの `(default)` database を作成・利用・変更しません。また、既存の `(default)` 内データを `claude-agent-chat` へ自動移行しません。既存データが必要な場合は、別途承認した移行手順を実施してください。
 
@@ -49,10 +49,58 @@ Claude の推論には Vertex AI を使用します。既定は `us-east5` の C
 ```bash
 gcloud auth application-default login
 uv sync --group streamlit
-uv run streamlit run sample_frontend/app.py
+uv run streamlit run example/streamlit_frontend/app.py
 ```
 
 サイドバーで `Release config` と `User ID` を指定すると、Firestore の session / run / event と Cloud Run Job の開始・cancel へ接続します。
+
+## サンプルとストリーミング確認
+
+共通の `example.chat.ChatService` が release config から `ControlClient` を構成し、session/run 開始、保存済みイベントの catch-up、カーソル付き購読、重複排除、再接続、終端判定を担当します。各フロントエンドは入力変換と表示だけを行います。
+
+### CLI（JSON Lines）
+
+```bash
+uv sync --group dev
+uv run python -m example.cli \
+  --release-config release.example.yaml \
+  --user-id test-user \
+  --prompt 'リポジトリの概要を説明して' \
+  --idempotency-key cli-request-1
+```
+
+標準出力には開始結果と各イベントが一レコードずつ出力され、各行の直後に flush されます。開始時に表示された `session_id` を使うと会話を継続できます。
+
+```bash
+uv run python -m example.cli \
+  --release-config release.example.yaml \
+  --user-id test-user \
+  --session-id SESSION_ID \
+  --prompt '前の回答を短くまとめて'
+```
+
+診断は標準エラーへ出力します。設定・開始失敗は終了コード 2、run の failed / cancelled / timed out は 1 です。release config に token や password を保存しないでください。
+
+### Slack Socket Mode
+
+Slack App では Socket Mode を有効にし、Bot Token Scopes に `chat:write`、`channels:history`（必要な private channel では `groups:history`）を付与します。Event Subscriptions で `message.channels`（private channel は `message.groups`）を購読し、Socket Mode 用 App-Level Token に `connections:write` を付与します。Bot を対象チャンネルへ invite してください。
+
+秘密値はファイルへ書かず、次の環境変数から読み込みます。
+
+```bash
+export SLACK_APP_TOKEN=xapp-...
+export SLACK_BOT_TOKEN=xoxb-...
+export SLACK_BOT_USER_ID=U...
+export SLACK_TEAM_ID=T...
+uv sync --group slack
+uv run python -m example.slackbot_frontend.app --release-config release.example.yaml
+```
+
+Bot はイベントを即時 acknowledge し、バックグラウンドで run を開始します。team/channel/thread とアプリケーション user/session の対応は release config の named Firestore database 内へ保存されるため、再起動後も同じスレッドを継続できます。Slack event ID を idempotency key に使い、Bot 自身の投稿は無視します。
+
+### Job、再訪、キャンセル、障害確認
+
+Job の起動は `example/Dockerfile` の `python -m example.agent` を entrypoint とします。Streamlit は `example/streamlit_frontend/app.py`、Slack は `example/slackbot_frontend/app.py` から起動します。画面を再訪すると保存済み履歴を読み直し、active run は reconcile して増分表示します。実行中の run は UI の Cancel または `ControlClient.cancel(run_id)` でキャンセルできます。Job の失敗や Execution 消失は `ControlClient.reconcile(run_id, holder=...)` で安全な終端状態へ補正します。
 
 Cloud Run Job の実行状況は Cloud Logging で確認できます。`job.start`、`job.claim.acquired`、`claude_sdk.query.start`、SDK message ごとの `job.events.persisted`、終端の `job.finish` または `job.failed` を出力します。prompt や tool payload はログ出力しません。
 

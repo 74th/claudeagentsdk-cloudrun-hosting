@@ -1,4 +1,5 @@
 """Cloud Run Job entrypoint for one persisted RUN_ID."""
+
 from __future__ import annotations
 
 import asyncio
@@ -141,7 +142,3 @@ async def run() -> int:
 
 def main() -> int:
     return asyncio.run(run())
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

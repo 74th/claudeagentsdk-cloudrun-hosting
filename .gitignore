@@ -1,6 +1,7 @@
 .env
 .venv
 .work
+.envrc
 *.tfstate
 *.tfstate.backup
 .terraform

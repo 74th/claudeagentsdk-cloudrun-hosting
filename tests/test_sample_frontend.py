@@ -1,10 +1,11 @@
 from cas_hosting_adapter.control_client import ControlClient
 from cas_hosting_adapter.errors import ExecutionTemporaryError
-from cas_hosting_adapter.factory import GoogleCloudSettings
 from cas_hosting_adapter.in_memory_chat_store import InMemoryChatStore
 from cas_hosting_adapter.models import ChatEvent, ExecutionState, RunState
 from cas_hosting_adapter.protocols import InMemoryExecutionBackend
-from sample_frontend.app import (
+from example.chat import ChatService
+from example.chat.events import normalize_events
+from example.streamlit_frontend.app import (
     DRAFT_STATE_KEY,
     SELECTED_SESSION_KEY,
     ChatViewModel,
@@ -59,23 +60,19 @@ def test_order_sessions_returns_newest_updated_session_first() -> None:
 
 def test_view_model_creates_session_and_starts_run() -> None:
     view = ChatViewModel(
-        ControlClient(InMemoryChatStore(), InMemoryExecutionBackend()), ManualIdentity("user")
+        ChatService(ControlClient(InMemoryChatStore(), InMemoryExecutionBackend()), "user")
     )
     session = view.create_session()
     run = view.start(session, "hello", "key")
     assert run.execution is not None
     assert view.session(session.id).active_run_id == run.id
-    received: list[str] = []
-    unsubscribe = view.subscribe(run.id, lambda event: received.append(event.id))
-    unsubscribe()
-    assert received == [f"user:{run.id}"]
     assert [event.id for event in view.events(run.id)] == [f"user:{run.id}"]
 
 
 def test_view_model_reconciles_active_run_without_provider_dependency() -> None:
     store = InMemoryChatStore()
     backend = InMemoryExecutionBackend()
-    view = ChatViewModel(ControlClient(store, backend), ManualIdentity("user"))
+    view = ChatViewModel(ChatService(ControlClient(store, backend), "user"))
     session = view.create_session()
     run = view.start(session, "hello", "key")
     assert run.execution is not None
@@ -93,7 +90,7 @@ def test_view_model_reconcile_preserves_active_run_after_temporary_error() -> No
             raise ExecutionTemporaryError("temporary")
 
     store = InMemoryChatStore()
-    view = ChatViewModel(ControlClient(store, TemporaryBackend()), ManualIdentity("user"))
+    view = ChatViewModel(ChatService(ControlClient(store, TemporaryBackend()), "user"))
     session = view.create_session()
     run = view.start(session, "hello", "key")
     assert view.reconcile(run.id).state is RunState.PENDING
@@ -102,7 +99,7 @@ def test_view_model_reconcile_preserves_active_run_after_temporary_error() -> No
 
 def test_history_does_not_render_streamed_answer_again_as_final_result() -> None:
     store = InMemoryChatStore()
-    view = ChatViewModel(ControlClient(store, InMemoryExecutionBackend()), ManualIdentity("user"))
+    view = ChatViewModel(ChatService(ControlClient(store, InMemoryExecutionBackend()), "user"))
     session = view.create_session()
     run = view.start(session, "summarize this", "key")
     answer = "GitHub プロフィール要約: 74th (Atsushi Morimoto)"
@@ -151,7 +148,7 @@ def test_history_reclassifies_legacy_tool_result_stored_as_user_event() -> None:
         },
     )
 
-    converted = ChatViewModel._normalise_legacy_events([legacy])
+    converted = normalize_events([legacy])
 
     assert [(event.type, event.payload) for event in converted] == [
         (
@@ -171,21 +168,11 @@ def test_release_config_builds_the_google_cloud_settings(monkeypatch, tmp_path) 
         "project_id: project\nregion: us-central1\nfirestore_location: us-central1\n"
         "firestore_database: claude-agent-chat\nbucket_name: bucket\nimage: image\njob_name: job\n"
     )
-    captured: list[GoogleCloudSettings] = []
-
-    def fake_client(settings: GoogleCloudSettings) -> ControlClient:
-        captured.append(settings)
+    def fake_client(_path) -> ControlClient:
         return ControlClient(InMemoryChatStore(), InMemoryExecutionBackend())
 
-    monkeypatch.setattr("sample_frontend.app.create_google_cloud_control_client", fake_client)
+    monkeypatch.setattr(
+        "example.streamlit_frontend.app.create_control_client_from_release_config", fake_client
+    )
     view = create_view_from_release_config(release, ManualIdentity("user"))
     assert view.sessions().sessions == []
-    assert captured == [
-        GoogleCloudSettings(
-            project="project",
-            region="us-central1",
-            firestore_database="claude-agent-chat",
-            bucket_name="bucket",
-            job_name="job",
-        )
-    ]

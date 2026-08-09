@@ -1,0 +1,1 @@
+"""Socket Mode Slack フロントエンド。"""
