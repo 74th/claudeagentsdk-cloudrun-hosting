@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock, Thread
 from typing import Any
 
 from cas_hosting_adapter.models import QuestionRequest
@@ -149,22 +150,45 @@ class SlackMessageHandler:
                             ),
                         )
                         return
-                    try:
-                        service.answer_question(
-                            binding.session_id,
-                            pending.run_id,
-                            pending.id,
-                            values,
-                            idempotency_key=idempotency_key,
-                        )
-                    except Exception:
-                        self._post(
-                            client,
-                            key,
-                            "この質問は既に回答済みか、回答受付が終了しています。",
-                        )
+                    session = service.get_session(binding.session_id)
+                    if session.active_run_id == pending.run_id:
+                        try:
+                            service.answer_question(
+                                binding.session_id,
+                                pending.run_id,
+                                pending.id,
+                                values,
+                                idempotency_key=idempotency_key,
+                            )
+                        except Exception:
+                            self._post(
+                                client,
+                                key,
+                                "この質問は既に回答済みか、回答受付が終了しています。",
+                            )
+                            return
+                        self._post(client, key, "回答を受け付けました。処理を続行します…")
                         return
-                    self._post(client, key, "回答を受け付けました。処理を続行します…")
+
+                    # A question can outlive its timed-out Cloud Run Job. In
+                    # that case the callback cannot be resumed; start the
+                    # durable session continuation instead.
+                    started = service.continue_after_question(
+                        binding.session_id,
+                        pending,
+                        values,
+                        idempotency_key=idempotency_key,
+                    )
+                    LOGGER.info(
+                        "slack.question.continuation_started event_id=%s session_id=%s run_id=%s",
+                        event_id,
+                        started.session_id,
+                        started.run_id,
+                    )
+                    response = self._post(
+                        client, key, "回答を受け付けました。処理を続行します…"
+                    )
+                    self._consume(service, started.run, client, key, response)
                     return
                 started = service.start(
                     prompt,
@@ -194,7 +218,59 @@ class SlackMessageHandler:
         presented_questions: set[str] = set()
         task_lines: list[str] = []
         last_update = 0.0
-        for event in service.stream(run):
+        presented_lock = Lock()
+
+        def present_pending_questions(fallback: QuestionRequest | None = None) -> None:
+            """Post canonical questions even when their stream event was missed."""
+            questions: list[QuestionRequest] = []
+            if fallback is not None:
+                questions.append(fallback)
+            if hasattr(service, "pending_questions"):
+                try:
+                    questions.extend(service.pending_questions(run.session_id, run.id))
+                except Exception:
+                    LOGGER.debug("slack.question.pending_poll_failed", exc_info=True)
+            for question in questions:
+                with presented_lock:
+                    if question.id in presented_questions:
+                        continue
+                    presented_questions.add(question.id)
+                try:
+                    self._post(client, key, format_question(question))
+                except Exception:
+                    with presented_lock:
+                        presented_questions.discard(question.id)
+                    LOGGER.exception(
+                        "slack.question.post_failed run_id=%s question_id=%s",
+                        run.id,
+                        question.id,
+                    )
+
+        def stream_with_question_watch() -> Iterator[Any]:
+            question_stop = Event()
+
+            def watch_pending_questions() -> None:
+                interval = max(self._update_interval, 1.0)
+                while not question_stop.wait(interval):
+                    present_pending_questions()
+
+            present_pending_questions()
+            question_watcher = Thread(
+                target=watch_pending_questions,
+                name=f"slack-question-{run.id}",
+                daemon=True,
+            )
+            question_watcher.start()
+            try:
+                yield from service.stream(run)
+            finally:
+                question_stop.set()
+                question_watcher.join(timeout=max(self._update_interval, 1.0) + 0.5)
+                # A question may have been persisted immediately before the
+                # terminal event. Make one final durable lookup before result.
+                present_pending_questions()
+
+        for event in stream_with_question_watch():
             now = time.monotonic()
             if event.type in {"tool_started", "tool_completed", "agent", "final", "terminal"}:
                 LOGGER.info(
@@ -223,15 +299,14 @@ class SlackMessageHandler:
             elif event.type == "progress" and event.content:
                 activity.append(f"進捗: {event.content}")
             elif event.type == "question_pending" and event.question is not None:
-                if event.question.id not in presented_questions:
-                    self._post(client, key, format_question(event.question))
-                    presented_questions.add(event.question.id)
+                present_pending_questions(event.question)
             elif event.type == "question_answered":
                 activity.append("質問への回答を受け付けました")
             elif event.type == "terminal":
                 terminal_state = str(event.payload.get("state", "unknown"))
             elif event.type == "unknown":
                 activity.append(f"イベント: {event.raw_type}")
+            present_pending_questions()
             terminal = event.type in {"final", "terminal"}
             if hasattr(service, "interaction_state_for_run"):
                 try:
@@ -312,14 +387,35 @@ class SlackMessageHandler:
 
     @staticmethod
     def _pending_question(service: ChatService, session_id: str) -> QuestionRequest | None:
-        if not hasattr(service, "get_session") or not hasattr(service, "pending_questions"):
+        if (
+            not hasattr(service, "get_session")
+            or not hasattr(service, "pending_questions")
+        ):
             return None
         try:
             session = service.get_session(session_id)
-            if session.active_run_id is None:
+            if session.active_run_id is not None:
+                run_ids = [session.active_run_id]
+            elif hasattr(service, "list_runs"):
+                # After a question timeout the session has no active run. Find
+                # the newest run with a still-pending question so a Slack reply
+                # can start a continuation instead of a new conversation turn.
+                runs: list[Any] = []
+                cursor: str | None = None
+                while True:
+                    page = service.list_runs(session_id, cursor=cursor, limit=100)
+                    runs.extend(page.runs)
+                    if page.next_cursor is None:
+                        break
+                    cursor = page.next_cursor
+                run_ids = [run.id for run in reversed(runs)]
+            else:
                 return None
-            questions = service.pending_questions(session_id, session.active_run_id)
-            return questions[0] if questions else None
+            for run_id in run_ids:
+                questions = service.pending_questions(session_id, run_id)
+                if questions:
+                    return questions[0]
+            return None
         except Exception:
             LOGGER.debug("slack.question.pending_lookup_failed", exc_info=True)
             return None

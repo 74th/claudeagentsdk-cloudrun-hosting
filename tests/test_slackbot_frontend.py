@@ -3,7 +3,16 @@ from __future__ import annotations
 from types import SimpleNamespace
 from uuid import uuid4
 
-from cas_hosting_adapter.models import Run
+from cas_hosting_adapter.models import (
+    QuestionOption,
+    QuestionRequest,
+    QuestionState,
+    Run,
+    RunPage,
+    RunState,
+    Session,
+)
+from example.chat.events import ChatEventKind, CommonChatEvent
 from example.chat.service import ChatStartResult
 from example.slackbot_frontend.handler import SlackMessageHandler
 from example.slackbot_frontend.store import (
@@ -68,6 +77,76 @@ class FakeSlackClient:
     def chat_update(self, **kwargs):
         self.updates.append(kwargs)
         return kwargs
+
+
+class PendingQuestionService(FakeService):
+    def __init__(self, user_id: str, question: QuestionRequest, *, timed_out: bool) -> None:
+        super().__init__(user_id, [])
+        self.question = question
+        self.session = Session(
+            id=question.id + "-session",
+            user_id=user_id,
+            workspace_id="workspace",
+            active_run_id=None if timed_out else question.run_id,
+            latest_run_state=RunState.TIMED_OUT.value if timed_out else RunState.RUNNING.value,
+        )
+        self.continuations: list[tuple[str, list[str]]] = []
+        self.continuation_run = Run(
+            user_id=user_id,
+            session_id=self.session.id,
+            workspace_id="workspace",
+            idempotency_key="continuation",
+        )
+
+    def get_session(self, _session_id: str) -> Session:
+        return self.session
+
+    def pending_questions(self, _session_id: str, run_id, list_unused=None):
+        if run_id == self.question.run_id and self.question.state is QuestionState.PENDING:
+            return [self.question]
+        return []
+
+    def list_runs(self, _session_id: str, *, cursor=None, limit=100):
+        run = Run(
+            id=self.question.run_id,
+            user_id=self.user_id,
+            session_id=self.session.id,
+            workspace_id="workspace",
+            idempotency_key="original",
+            state=RunState.TIMED_OUT,
+        )
+        return RunPage(runs=[run], next_cursor=None)
+
+    def continue_after_question(self, _session_id, question, answers, *, idempotency_key):
+        self.continuations.append((question.id, list(answers)))
+        return ChatStartResult(self.session.id, self.continuation_run.id, self.continuation_run)
+
+    def stream(self, _run):
+        yield CommonChatEvent(
+            id="continuation-final",
+            run_id=uuid4(),
+            sequence=1,
+            kind=ChatEventKind.FINAL,
+            raw_type="final",
+            payload={"output": "継続しました"},
+            content="継続しました",
+        )
+
+
+def make_question(run_id=None) -> QuestionRequest:
+    return QuestionRequest(
+        id="question-1",
+        run_id=run_id or uuid4(),
+        ordinal=1,
+        question="どれにしますか？",
+        header="確認",
+        options=[
+            QuestionOption(label="A", description="A を選ぶ"),
+            QuestionOption(label="B", description="B を選ぶ"),
+            QuestionOption(label="C", description="C を選ぶ"),
+        ],
+        idempotency_key="question-key",
+    )
 
 
 def test_slack_handler_acknowledges_immediately_and_continues_thread() -> None:
@@ -164,3 +243,68 @@ def test_slack_message_keeps_result_and_respects_length_limit() -> None:
 
     assert len(message) <= 3900
     assert "最終結果:\n最終回答です" in message
+
+
+def test_slack_handler_posts_durable_pending_question() -> None:
+    question = make_question()
+    service = PendingQuestionService("app-user", question, timed_out=False)
+    client = FakeSlackClient()
+    handler = SlackMessageHandler(
+        lambda _user_id: service,
+        InMemorySlackThreadSessionStore(),
+        bot_user_id="B-bot",
+        update_interval=0,
+        executor=DirectExecutor(),
+    )
+    key = SlackThreadKey("T-team", "C-channel", "1.0")
+    response = client.chat_postMessage(
+        channel=key.channel_id, thread_ts=key.thread_ts, text="working"
+    )
+    original_run = Run(
+        id=question.run_id,
+        user_id=service.user_id,
+        session_id=service.session.id,
+        workspace_id="workspace",
+        idempotency_key="original",
+    )
+
+    handler._consume(service, original_run, client, key, response)
+
+    assert any("どれにしますか？" in post["text"] for post in client.posts)
+
+
+def test_slack_handler_continues_after_question_timeout() -> None:
+    question = make_question()
+    service = PendingQuestionService("app-user", question, timed_out=True)
+    store = InMemorySlackThreadSessionStore()
+    key = SlackThreadKey("T-team", "C-channel", "1.0")
+    store.create_if_absent(
+        key,
+        application_user_id=application_user_id("T-team", "U-user"),
+        session_id=service.session.id,
+    )
+    client = FakeSlackClient()
+    handler = SlackMessageHandler(
+        lambda _user_id: service,
+        store,
+        bot_user_id="B-bot",
+        update_interval=0,
+        executor=DirectExecutor(),
+    )
+
+    handler.handle(
+        {
+            "user": "U-user",
+            "text": "2",
+            "channel": key.channel_id,
+            "thread_ts": key.thread_ts,
+            "ts": "2.0",
+            "event_id": "Ev-answer",
+        },
+        lambda: None,
+        client,
+        team_id=key.team_id,
+    )
+
+    assert service.continuations == [(question.id, ["B"])]
+    assert any("回答を受け付けました" in post["text"] for post in client.posts)
