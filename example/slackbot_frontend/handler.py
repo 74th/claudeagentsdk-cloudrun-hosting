@@ -8,11 +8,12 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from example.chat import ChatService
+from example.chat import ChatService, normalize_events
 
 from .store import SlackThreadKey, SlackThreadSessionStore, application_user_id
 
 LOGGER = logging.getLogger(__name__)
+MAX_SLACK_TEXT_LENGTH = 3900
 
 
 class SlackMessageHandler:
@@ -36,22 +37,38 @@ class SlackMessageHandler:
         )
 
     def handle(
-        self, event: dict[str, Any], ack: Callable[[], None], client: Any, *, team_id: str
+        self,
+        event: dict[str, Any],
+        ack: Callable[[], None],
+        client: Any,
+        *,
+        team_id: str,
+        event_id: str | None = None,
     ) -> None:
         """ack は run 開始前に呼び、長時間処理は worker へ渡す。"""
         ack()
+        received_event_id = event_id or event.get("event_id") or event.get("ts")
+        LOGGER.info(
+            "slack.event.received event_id=%s type=%s channel=%s user=%s",
+            received_event_id,
+            event.get("type"),
+            event.get("channel"),
+            event.get("user"),
+        )
         if self._is_self_event(event):
+            LOGGER.info("slack.event.ignored_self event_id=%s", received_event_id)
             return
         user_id = event.get("user")
         text = event.get("text")
         channel_id = event.get("channel")
         thread_ts = event.get("thread_ts") or event.get("ts")
-        event_id = event.get("event_id") or event.get("client_msg_id") or event.get("ts")
-        values = (user_id, text, channel_id, thread_ts, event_id)
+        received_event_id = received_event_id or event.get("client_msg_id")
+        values = (user_id, text, channel_id, thread_ts, received_event_id)
         if not all(isinstance(value, str) and value.strip() for value in values):
+            LOGGER.warning("slack.event.ignored_invalid event_id=%s", received_event_id)
             return
         key = SlackThreadKey(team_id, channel_id, thread_ts)
-        self._executor.submit(self._run, key, user_id, text, event_id, client)
+        self._executor.submit(self._run, key, user_id, text, received_event_id, client)
 
     def _is_self_event(self, event: dict[str, Any]) -> bool:
         return bool(
@@ -89,6 +106,12 @@ class SlackMessageHandler:
                     session_id=binding.session_id,
                     idempotency_key=idempotency_key,
                 )
+            LOGGER.info(
+                "slack.run.started event_id=%s session_id=%s run_id=%s",
+                event_id,
+                started.session_id,
+                started.run_id,
+            )
             response = self._post(client, key, "受け付けました。処理中です…")
             self._consume(service, started.run, client, key, response)
         except Exception:
@@ -98,26 +121,108 @@ class SlackMessageHandler:
     def _consume(
         self, service: ChatService, run: Any, client: Any, key: SlackThreadKey, response: Any
     ) -> None:
-        text = ""
+        streamed_text = ""
+        final_text: str | None = None
+        activity: list[str] = []
+        tool_names: dict[str, str] = {}
+        terminal_state: str | None = None
         last_update = 0.0
         for event in service.stream(run):
             now = time.monotonic()
+            if event.type in {"tool_started", "tool_completed", "agent", "final", "terminal"}:
+                LOGGER.info(
+                    "slack.stream.event run_id=%s type=%s content_length=%d",
+                    run.id,
+                    event.type,
+                    len(event.content or ""),
+                )
             if event.type == "agent" and event.content:
-                text += event.content
+                streamed_text += event.content
+            elif event.type == "final" and event.content:
+                # Agent chunks are useful while streaming, but the final event
+                # is the canonical answer and must not be appended twice.
+                final_text = event.content
             elif event.type == "tool_started":
-                text = f"{text}\n\n_ツール実行中: {event.payload.get('name', 'tool')}_"
+                name = str(event.payload.get("name") or "tool")
+                tool_id = str(event.payload.get("tool_id") or "")
+                if tool_id:
+                    tool_names[tool_id] = name
+                activity.append(f"ツール開始: {name}")
+            elif event.type == "tool_completed":
+                tool_id = str(event.payload.get("tool_id") or "")
+                name = tool_names.get(tool_id, tool_id or "tool")
+                suffix = "（エラー）" if event.payload.get("is_error") else ""
+                activity.append(f"ツール完了: {name}{suffix}")
             elif event.type == "progress" and event.content:
-                text = f"{text}\n\n_進捗: {event.content}_"
+                activity.append(f"進捗: {event.content}")
             elif event.type == "terminal":
-                state = event.payload.get("state", "unknown")
-                text = f"{text}\n\n実行終了: {state}"
+                terminal_state = str(event.payload.get("state", "unknown"))
+            elif event.type == "unknown":
+                activity.append(f"イベント: {event.raw_type}")
             terminal = event.type in {"final", "terminal"}
-            if text and (now - last_update >= self._update_interval or terminal):
-                self._update(client, response, text or "処理が完了しました。")
+            message = self._compose_message(
+                activity, final_text or streamed_text, terminal_state
+            )
+            if message and (now - last_update >= self._update_interval or terminal):
+                self._update(client, response, message)
+                LOGGER.info("slack.reply.updated run_id=%s length=%d", run.id, len(message))
                 last_update = now
-        if not text:
-            text = "処理が完了しました。"
-        self._update(client, response, text)
+        if not final_text and hasattr(service, "events"):
+            # A Firestore watch may close at the same moment as terminal state
+            # reconciliation. Read the durable history once more so the final
+            # answer is not lost at that boundary.
+            try:
+                for saved in normalize_events(service.events(run.id)):
+                    if saved.type == "final" and saved.content:
+                        final_text = saved.content
+                    elif saved.type == "agent" and saved.content and not streamed_text:
+                        streamed_text += saved.content
+                    elif saved.type == "tool_started":
+                        activity.append(f"ツール開始: {saved.payload.get('name') or 'tool'}")
+                    elif saved.type == "tool_completed":
+                        activity.append("ツール完了")
+                LOGGER.info(
+                    "slack.stream.history_fallback run_id=%s final_length=%d",
+                    run.id,
+                    len(final_text or ""),
+                )
+            except Exception:
+                LOGGER.exception("slack.stream.history_fallback_failed run_id=%s", run.id)
+        if terminal_state is None and hasattr(service, "get_run"):
+            try:
+                terminal_state = service.get_run(run.session_id, run.id).state.value
+            except Exception:
+                LOGGER.debug("slack.run.state_unavailable run_id=%s", run.id)
+        message = self._compose_message(activity, final_text or streamed_text, terminal_state)
+        final_message = message or "処理が完了しました。"
+        self._update(client, response, final_message)
+        LOGGER.info("slack.reply.updated run_id=%s length=%d", run.id, len(final_message))
+
+    @staticmethod
+    def _compose_message(
+        activity: list[str], result: str, terminal_state: str | None
+    ) -> str:
+        """作業履歴と結果を Slack の安全な長さへ整形する。"""
+        activity_text = "\n".join(dict.fromkeys(activity))
+        prefix = f"作業内容:\n{activity_text}" if activity_text else ""
+        result_text = f"最終結果:\n{result}" if result else ""
+        state_text = f"実行終了: {terminal_state}" if terminal_state else ""
+        suffix = "\n\n".join(part for part in (result_text, state_text) if part)
+        if prefix and suffix:
+            available = MAX_SLACK_TEXT_LENGTH - len(suffix) - 2
+            prefix = SlackMessageHandler._truncate(prefix, max(0, available))
+            message = f"{prefix}\n\n{suffix}" if prefix else suffix
+        else:
+            message = prefix or suffix
+        return SlackMessageHandler._truncate(message, MAX_SLACK_TEXT_LENGTH)
+
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        if limit <= 1:
+            return "…"[:limit]
+        return text[: limit - 1] + "…"
 
     def _post(self, client: Any, key: SlackThreadKey, text: str) -> Any:
         return self._call_with_retry(

@@ -104,6 +104,7 @@ def test_slack_handler_acknowledges_immediately_and_continues_thread() -> None:
     assert len(client.posts) == 2
     assert all(post["thread_ts"] == "1.0" for post in client.posts)
     assert client.updates
+    assert "最終結果:\n応答" in client.updates[-1]["text"]
     key = SlackThreadKey("T-team", "C-channel", "1.0")
     binding = store.get(key)
     assert binding is not None
@@ -153,3 +154,12 @@ def test_slack_rate_limit_uses_retry_after() -> None:
 
     assert handler._call_with_retry(method) == "ok"
     assert waits == [2.0]
+
+
+def test_slack_message_keeps_result_and_respects_length_limit() -> None:
+    message = SlackMessageHandler._compose_message(
+        ["作業内容: " + "x" * 5000], "最終回答です", "completed"
+    )
+
+    assert len(message) <= 3900
+    assert "最終結果:\n最終回答です" in message

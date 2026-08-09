@@ -15,6 +15,7 @@ class SlackBotSettings:
     release_config: Path
     app_token: str
     bot_token: str
+    signing_secret: str
     bot_user_id: str
     team_id: str
 
@@ -23,6 +24,7 @@ class SlackBotSettings:
         values = {
             "app_token": os.environ.get("SLACK_APP_TOKEN", "").strip(),
             "bot_token": os.environ.get("SLACK_BOT_TOKEN", "").strip(),
+            "signing_secret": os.environ.get("SLACK_SIGNING_SECRET", "").strip(),
             "bot_user_id": os.environ.get("SLACK_BOT_USER_ID", "").strip(),
             "team_id": os.environ.get("SLACK_TEAM_ID", "").strip(),
         }
