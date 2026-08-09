@@ -11,9 +11,25 @@ from .models import (
     derive_workspace_id,
     normalize_session_title,
 )
+from .runtime import (
+    AgentConfig,
+    AgentExecutionResult,
+    ClaudeAgentConfig,
+    ExecutionResult,
+    RuntimePolicy,
+    WorkspaceInitializer,
+    WorkspaceSetup,
+)
 
 __all__ = [
     "ControlClient",
+    "AgentExecutionResult",
+    "AgentConfig",
+    "ClaudeAgentConfig",
+    "ExecutionResult",
+    "RuntimePolicy",
+    "WorkspaceInitializer",
+    "WorkspaceSetup",
     "InitialSessionResult",
     "Run",
     "RunPage",

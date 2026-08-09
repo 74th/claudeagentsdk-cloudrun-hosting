@@ -109,6 +109,20 @@ Streamlit または Slack の入力に、エージェントへ選択を求める
 
 Job の起動は `example/Dockerfile` の `python -m example.agent` を entrypoint とします。Streamlit は `example/streamlit_frontend/app.py`、Slack は `example/slackbot_frontend/app.py` から起動します。画面を再訪すると保存済み履歴を読み直し、active run は reconcile して増分表示します。実行中の run は UI の Cancel または `ControlClient.cancel(run_id)` でキャンセルできます。Job の失敗や Execution 消失は `ControlClient.reconcile(run_id, holder=...)` で安全な終端状態へ補正します。
 
+### Job runtime の責務境界
+
+サンプルの `example/agent/runtime.py` は `ClaudeAgentConfig`、冪等な
+`workspace_setup(path)`、Google Cloud composition の生成、および
+`run_from_environment()` の呼び出しだけを定義します。Agent の system prompt、model、tools
+を変更しても、Store の state 遷移、snapshot、Claude transcript の resume、質問 timeout、
+終端 commit を変更する必要はありません。
+
+フレームワークの `ClaudeAgentAdapter.run_job(invocation)` が claim、prompt/session の取得、
+snapshot 復元または初回 initializer、毎回の workspace setup、SDK event 永続化、snapshot 保存、
+成功・cancel・timeout・失敗の終端処理、temporary directory の cleanup を一つの lifecycle として
+実行します。低水準の `events()` と `run()` は 2026-09-30 までの test seam であり、sample の入口では
+使用しません。
+
 Cloud Run Job の実行状況は Cloud Logging で確認できます。`job.start`、`job.claim.acquired`、`claude_sdk.query.start`、SDK message ごとの `job.events.persisted`、終端の `job.finish` または `job.failed` を出力します。prompt や tool payload はログ出力しません。
 
 ```bash

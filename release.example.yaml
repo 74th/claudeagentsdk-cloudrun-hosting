@@ -7,7 +7,7 @@ region: us-central1
 firestore_location: us-central1
 firestore_database: claude-agent-chat
 bucket_name: nnyn-dev-agent-hosting-poc-us-central1
-image: us-central1-docker.pkg.dev/nnyn-dev/claude-agent/agent@sha256:a1d70d143ca192a7d0ec9fd744dd2e4104013e1ed22ef74df75b73ee5edecd10
+image: us-central1-docker.pkg.dev/nnyn-dev/claude-agent/agent@sha256:652d70e319a586ba595e5c5f097ac0222ddaaf0162798e46398411e9e230394a
 job_name: test-claudesdk-cloudrun
 task_timeout_seconds: 1800
 question_timeout_seconds: 300

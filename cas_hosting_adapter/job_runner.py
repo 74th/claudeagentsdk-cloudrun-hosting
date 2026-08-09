@@ -76,10 +76,11 @@ class JobRunner:
         invocation: JobInvocation,
         events: AsyncIterator[dict[str, object]],
         *,
+        claimed_run: Run | None = None,
         limits: ExecutionLimits | None = None,
     ) -> RunState:
         """Persist each normalized agent event while honoring durable cancellation."""
-        for_event = self.claim(invocation)
+        for_event = claimed_run or self.claim(invocation)
         if for_event is None:
             LOGGER.info("job.events.cancelled_before_start run_id=%s", invocation.run_id)
             return RunState.CANCELLED

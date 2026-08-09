@@ -7,14 +7,28 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from .errors import AgentError, AgentQuestionTimeoutError
-from .models import QuestionOption, QuestionRequest, QuestionState
+from .job_runner import ExecutionLimits, JobInvocation, JobRunner
+from .models import QuestionOption, QuestionRequest, QuestionState, RunState
 from .protocols import ChatStore
+from .runtime import (
+    AgentExecutionResult,
+    ClaudeAgentConfig,
+    RuntimePolicy,
+    WorkspaceInitializer,
+    WorkspaceSetup,
+)
+from .workspace_store import (
+    StoragePaths,
+    create_workspace_snapshot,
+    request_directories,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -163,7 +177,10 @@ class RestoredTranscriptSessionStore:
             LOGGER.warning("claude_sdk.session_store.missing session_id=%s", session_id)
             return None
         try:
-            lines = candidates[0].read_text(encoding="utf-8").splitlines()
+            source = candidates[0].read_bytes()
+            if any(candidate.read_bytes() != source for candidate in candidates[1:]):
+                raise AgentError("multiple restored transcripts conflict for the resume session")
+            lines = source.decode("utf-8").splitlines()
             entries = [json.loads(line) for line in lines]
         except (OSError, json.JSONDecodeError):
             LOGGER.exception("claude_sdk.session_store.load_failed session_id=%s", session_id)
@@ -179,12 +196,36 @@ class RestoredTranscriptSessionStore:
         return entries
 
 
+class _ClaudeSessionExecutor:
+    """Private SDK session seam used by the durable adapter facade."""
+
+    def __init__(self, adapter: ClaudeAgentAdapter) -> None:
+        self._adapter = adapter
+
+    async def events(
+        self, *, prompt: str, workspace: Path, transcript_dir: Path, resume: str | None
+    ) -> AsyncIterator[dict[str, Any]]:
+        async for event in self._adapter._events(
+            prompt=prompt,
+            workspace=workspace,
+            transcript_dir=transcript_dir,
+            resume=resume,
+        ):
+            yield event
+
+
 class ClaudeAgentAdapter:
     def __init__(
         self,
         agent: Any | None = None,
         *,
-        model: str,
+        model: str | None = None,
+        agent_config: ClaudeAgentConfig | None = None,
+        chat_store: ChatStore | None = None,
+        workspace_store: Any | None = None,
+        runtime_policy: RuntimePolicy | None = None,
+        workspace_initializer: WorkspaceInitializer | None = None,
+        workspace_setup: WorkspaceSetup | None = None,
         question_store: ChatStore | None = None,
         run_id: UUID | None = None,
         question_timeout: float | None = None,
@@ -193,10 +234,33 @@ class ClaudeAgentAdapter:
         # module is imported inside events() so each JobRunner process owns its
         # Claude session files and no provider client escapes this boundary.
         self.agent = agent
-        self.model = model
-        self.question_store = question_store
+        if agent_config is not None and model is not None and model != agent_config.model:
+            raise ValueError("model must match agent_config.model")
+        self.agent_config = agent_config or ClaudeAgentConfig(
+            model=model or "claude-haiku-4-5@20251001"
+        )
+        self.model = self.agent_config.model
+        self.chat_store = chat_store or question_store
+        self.workspace_store = workspace_store
+        self.runtime_policy = runtime_policy or RuntimePolicy(
+            question_timeout=question_timeout
+        )
+        if question_timeout is not None and runtime_policy is not None:
+            self.runtime_policy = RuntimePolicy(
+                snapshot_max_bytes=runtime_policy.snapshot_max_bytes,
+                question_timeout=question_timeout,
+                sdk_version=runtime_policy.sdk_version,
+                snapshot_schema_version=runtime_policy.snapshot_schema_version,
+                max_runtime=runtime_policy.max_runtime,
+                idle_timeout=runtime_policy.idle_timeout,
+                log_level=runtime_policy.log_level,
+            )
+        self.workspace_initializer = workspace_initializer
+        self.workspace_setup = workspace_setup
+        self.question_store = self.chat_store
         self.run_id = run_id
-        self.question_timeout = question_timeout
+        self.question_timeout = self.runtime_policy.question_timeout
+        self._session_executor = _ClaudeSessionExecutor(self)
 
     def _options(
         self,
@@ -220,6 +284,10 @@ class ClaudeAgentAdapter:
             # so AskUserQuestion can actually suspend the session.
             "permission_mode": "default" if can_use_tool is not None else "bypassPermissions",
         }
+        if self.agent_config.system_prompt:
+            options["system_prompt"] = self.agent_config.system_prompt
+        if self.agent_config.allowed_tools:
+            options["allowed_tools"] = list(self.agent_config.allowed_tools)
         if resume is not None:
             options["resume"] = resume
             # `resume` normally resolves a transcript by a cwd-derived path.
@@ -230,6 +298,191 @@ class ClaudeAgentAdapter:
         if can_use_tool is not None:
             options["can_use_tool"] = can_use_tool
         return options
+
+    @staticmethod
+    def _workspace_key(workspace: Path) -> str:
+        """Return Claude Code's portable project directory key."""
+
+        return str(workspace.resolve()).replace("/", "-")
+
+    def _prepare_transcript_resume(
+        self, transcript_dir: Path, workspace: Path, session_id: str
+    ) -> None:
+        """Make only the requested restored transcript visible at the new cwd.
+
+        Temporary workspace paths change for every Cloud Run Job.  Older SDK
+        versions resolve a session through a cwd-derived project directory, so
+        the adapter maps the single requested JSONL rather than copying every
+        transcript in a snapshot.
+        """
+
+        if not session_id.strip():
+            raise AgentError("resume session ID must not be blank")
+        projects = transcript_dir / ".claude" / "projects"
+        destination_dir = projects / self._workspace_key(workspace)
+        candidates = sorted(projects.glob(f"**/{session_id}.jsonl"))
+        if not candidates:
+            LOGGER.info("claude_sdk.transcript.not_found session_id=%s", session_id)
+            return
+        source = candidates[0]
+        source_data = source.read_bytes()
+        if any(candidate.read_bytes() != source_data for candidate in candidates[1:]):
+            raise AgentError("multiple restored transcripts conflict for the resume session")
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / source.name
+        if source == destination:
+            return
+        if destination.exists():
+            if destination.read_bytes() != source_data:
+                raise AgentError("resume transcript destination conflicts with restored session")
+            return
+        shutil.copy2(source, destination)
+
+    async def run_job(self, invocation: JobInvocation) -> int:
+        """Run one claimed durable job and return its process exit code.
+
+        All Store mutations happen here or in the private JobRunner seam.  The
+        application callback receives only a workspace path.
+        """
+
+        if self.chat_store is None or self.workspace_store is None:
+            raise ValueError("chat_store and workspace_store are required for run_job")
+        runner = JobRunner(self.chat_store)
+        claimed = runner.claim(invocation)
+        if claimed is None:
+            return 0
+        result: AgentExecutionResult | None = None
+        try:
+            prompt = runner.prompt_for_run(invocation.run_id)
+            session = self.chat_store.get_session(claimed.user_id, claimed.session_id)
+            with request_directories() as directories:
+                if session.snapshot is not None:
+                    # Existing snapshots contain the archive created by the
+                    # WorkspaceStore.  Manifest validation remains available
+                    # to callers using the stricter helper; job snapshots use
+                    # the unchanged provider-neutral reference format.
+                    data = self.workspace_store.get(session.snapshot)
+                    archive = directories.root / "resume.tar.gz"
+                    archive.write_bytes(data)
+                    try:
+                        from .workspace_store import extract_snapshot
+
+                        extract_snapshot(
+                            archive,
+                            directories,
+                            max_bytes=self.runtime_policy.snapshot_max_bytes,
+                        )
+                    finally:
+                        archive.unlink(missing_ok=True)
+                elif self.workspace_initializer is not None:
+                    self.workspace_initializer(directories.workspace)
+                if self.workspace_setup is not None:
+                    self.workspace_setup(directories.workspace)
+
+                resume = session.claude_session_id
+                if resume is not None:
+                    self._prepare_transcript_resume(
+                        directories.claude_session, directories.workspace, resume
+                    )
+                execution = ClaudeAgentAdapter(
+                    agent_config=self.agent_config,
+                    chat_store=self.chat_store,
+                    runtime_policy=self.runtime_policy,
+                    run_id=invocation.run_id,
+                )
+                limits = None
+                if self.runtime_policy.max_runtime and self.runtime_policy.idle_timeout:
+                    limits = ExecutionLimits(
+                        self.runtime_policy.max_runtime, self.runtime_policy.idle_timeout
+                    )
+                try:
+                    state = await runner.persist_events(
+                        invocation,
+                        execution.events(
+                            prompt=prompt,
+                            workspace=directories.workspace,
+                            transcript_dir=directories.claude_session,
+                            resume=resume,
+                        ),
+                        claimed_run=claimed,
+                        limits=limits,
+                    )
+                    if state is RunState.TIMED_OUT:
+                        result = AgentExecutionResult(
+                            "timed_out",
+                            claude_session_id=runner.claude_session_id,
+                            error_code="timeout",
+                            snapshot_required=True,
+                        )
+                    elif state is RunState.CANCELLED:
+                        result = AgentExecutionResult(
+                            "cancelled",
+                            claude_session_id=runner.claude_session_id,
+                            error_code="cancelled",
+                        )
+                    else:
+                        result = AgentExecutionResult(
+                            "completed",
+                            output=runner.result_for_run(invocation.run_id),
+                            claude_session_id=runner.claude_session_id,
+                            snapshot_required=True,
+                        )
+                except AgentQuestionTimeoutError:
+                    result = AgentExecutionResult(
+                        "timed_out",
+                        claude_session_id=runner.claude_session_id,
+                        error_code="question_timeout",
+                        snapshot_required=True,
+                    )
+
+                snapshot = None
+                if result.snapshot_required:
+                    current = self.chat_store.get_run_for_job(invocation.run_id)
+                    paths = StoragePaths.for_session(
+                        user_id=current.user_id,
+                        session_id=current.session_id,
+                        schema_version=current.schema_version,
+                        sdk_version=self.runtime_policy.sdk_version,
+                    )
+                    snapshot, _manifest = create_workspace_snapshot(
+                        self.workspace_store,
+                        object_key=paths.snapshot_path(invocation.run_id),
+                        source=directories,
+                        run_id=invocation.run_id,
+                        sdk_version=self.runtime_policy.sdk_version,
+                        max_bytes=self.runtime_policy.snapshot_max_bytes,
+                    )
+                if result.status == "completed":
+                    if snapshot is None:
+                        raise AgentError("completed execution has no workspace snapshot")
+                    runner.commit_success(
+                        invocation,
+                        result=result.output or "",
+                        snapshot=snapshot,
+                        claude_session_id=result.claude_session_id,
+                    )
+                else:
+                    runner.commit_unsuccessful(
+                        invocation,
+                        {
+                            "cancelled": RunState.CANCELLED,
+                            "timed_out": RunState.TIMED_OUT,
+                        }[result.status],
+                        error_code=result.error_code,
+                        snapshot=snapshot,
+                        claude_session_id=result.claude_session_id,
+                    )
+        except Exception as error:
+            LOGGER.exception("job.lifecycle.failed run_id=%s", invocation.run_id)
+            try:
+                runner.commit_unsuccessful(
+                    invocation, state=RunState.FAILED,
+                    error_code=getattr(error, "code", "job_failed"),
+                )
+            except Exception:
+                LOGGER.exception("job.lifecycle.failure_commit_failed run_id=%s", invocation.run_id)
+            return 1
+        return 0 if result is not None and result.status == "completed" else 1
 
     @staticmethod
     def _event_id(
@@ -322,7 +575,7 @@ class ClaudeAgentAdapter:
             }
         return None
 
-    async def events(
+    async def _events(
         self, *, prompt: str, workspace: Path, transcript_dir: Path, resume: str | None = None
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield normalized SDK messages without mutating process-global environment."""
@@ -339,6 +592,8 @@ class ClaudeAgentAdapter:
             broker = AskUserQuestionBroker(
                 self.question_store, self.run_id, max_wait=self.question_timeout
             )
+        if resume is not None:
+            self._prepare_transcript_resume(transcript_dir, workspace, resume)
         options = self._options(
             workspace=workspace,
             transcript_dir=transcript_dir,
@@ -419,6 +674,24 @@ class ClaudeAgentAdapter:
             LOGGER.exception("claude_sdk.query.failed model=%s", self.model)
             raise AgentError("Claude Agent SDK invocation failed") from error
 
+    async def events(
+        self, *, prompt: str, workspace: Path, transcript_dir: Path, resume: str | None = None
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Deprecated low-level test seam; jobs use :meth:`run_job`.
+
+        Compatibility is retained until 2026-09-30 for repository tests and
+        provider experiments. Application code should not compose this stream
+        with JobRunner directly.
+        """
+
+        async for event in self._session_executor.events(
+            prompt=prompt,
+            workspace=workspace,
+            transcript_dir=transcript_dir,
+            resume=resume,
+        ):
+            yield event
+
     @staticmethod
     async def _prompt_stream(
         prompt: str, done: asyncio.Event | None = None
@@ -441,7 +714,10 @@ class ClaudeAgentAdapter:
         transcript_dir: Path,
         resume: str | None = None,
     ) -> str:
-        """Run either a new query or a resumed Claude session via one path."""
+        """Deprecated SDK test seam; use :meth:`run_job` for durable runs.
+
+        This compatibility wrapper is scheduled for removal on 2026-09-30.
+        """
         async for event in self.events(
             prompt=prompt,
             workspace=workspace,

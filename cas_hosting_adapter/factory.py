@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from datetime import timedelta
+from typing import Any, Literal, Protocol, cast
 
 from .batch_backend import BatchClient, CloudBatchBackend, GoogleCloudBatchClient
 from .cloud_run_backend import CloudRunJobsBackend
@@ -11,6 +14,9 @@ from .control_client import ControlClient
 from .firestore_chat_store import FirestoreChatStore
 from .firestore_codec import DEFAULT_RETENTION_DAYS
 from .protocols import AgentFactory, ChatStore, Clock, ExecutionBackend, WorkspaceStore
+from .runtime import ClaudeAgentConfig, RuntimePolicy, WorkspaceInitializer, WorkspaceSetup
+
+LOGGER = logging.getLogger(__name__)
 
 
 class IdentityProvider(Protocol):
@@ -47,6 +53,42 @@ class GoogleCloudSettings:
     vertex_region: str = "us-east5"
     claude_model: str = "claude-haiku-4-5@20251001"
     log_level: str = "INFO"
+
+    @classmethod
+    def from_environment(
+        cls, environment: dict[str, str] | None = None
+    ) -> GoogleCloudSettings:
+        """Parse and validate job configuration at the Cloud composition edge."""
+
+        values = os.environ if environment is None else environment
+
+        def required(name: str) -> str:
+            value = values.get(name, "").strip()
+            if not value:
+                raise ValueError(f"{name} must not be blank")
+            return value
+
+        def positive_int(name: str, default: int) -> int:
+            try:
+                value = int(values.get(name, str(default)))
+            except ValueError as error:
+                raise ValueError(f"{name} must be a positive integer") from error
+            if value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+            return value
+
+        return cls(
+            project=required("GOOGLE_CLOUD_PROJECT"),
+            region=values.get("CLOUD_RUN_REGION", "us-central1"),
+            firestore_database=required("FIRESTORE_DATABASE"),
+            bucket_name=required("WORKSPACE_BUCKET"),
+            retention_days=positive_int("RUN_RETENTION_DAYS", DEFAULT_RETENTION_DAYS),
+            task_timeout_seconds=positive_int("TASK_TIMEOUT_SECONDS", 1800),
+            question_timeout_seconds=positive_int("QUESTION_TIMEOUT_SECONDS", 300),
+            vertex_region=values.get("CLOUD_ML_REGION", "us-east5"),
+            claude_model=values.get("CLAUDE_MODEL", "claude-haiku-4-5@20251001"),
+            log_level=values.get("LOG_LEVEL", "INFO"),
+        )
 
     def __post_init__(self) -> None:
         if self.retention_days < 1:
@@ -86,6 +128,69 @@ class GoogleCloudClients:
     jobs: object | None = None
     executions: object | None = None
     batch: object | None = None
+
+
+@dataclass(frozen=True)
+class GoogleCloudJobComposition:
+    """Ready-to-run Cloud composition; no provider state leaks into examples."""
+
+    chat_store: ChatStore
+    workspace_store: WorkspaceStore
+    runtime_policy: RuntimePolicy
+
+    async def run_from_environment(
+        self,
+        agent_config: ClaudeAgentConfig,
+        *,
+        workspace_initializer: WorkspaceInitializer | None = None,
+        workspace_setup: WorkspaceSetup | None = None,
+        environment: dict[str, str] | None = None,
+    ) -> int:
+        from .agent_adapter import ClaudeAgentAdapter
+        from .job_runner import JobInvocation
+
+        invocation = JobInvocation.from_environment(environment)
+        adapter = ClaudeAgentAdapter(
+            agent_config=agent_config,
+            chat_store=self.chat_store,
+            workspace_store=self.workspace_store,
+            runtime_policy=self.runtime_policy,
+            workspace_initializer=workspace_initializer,
+            workspace_setup=workspace_setup,
+        )
+        return await adapter.run_job(invocation)
+
+
+def create_google_cloud_job_composition(
+    settings: GoogleCloudSettings | None = None,
+    *,
+    environment: dict[str, str] | None = None,
+) -> GoogleCloudJobComposition:
+    """Build stores and one shared runtime policy for a Cloud Run Job."""
+
+    resolved = settings or GoogleCloudSettings.from_environment(environment)
+    logging.basicConfig(
+        level=resolved.log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    clients = create_google_cloud_clients(resolved)
+    from .google_adapters import GCSWorkspaceStore
+
+    storage = cast(Any, clients.storage)
+    bucket = storage.bucket(resolved.bucket_name)
+    return GoogleCloudJobComposition(
+        chat_store=FirestoreChatStore(
+            clients.firestore, retention_days=resolved.retention_days
+        ),
+        workspace_store=GCSWorkspaceStore(bucket),
+        runtime_policy=RuntimePolicy(
+            question_timeout=float(resolved.question_timeout_seconds),
+            max_runtime=timedelta(seconds=resolved.task_timeout_seconds),
+            idle_timeout=timedelta(seconds=resolved.task_timeout_seconds),
+            sdk_version=RuntimePolicy().sdk_version,
+            log_level=resolved.log_level,
+        ),
+    )
 
 
 def create_google_cloud_clients(settings: GoogleCloudSettings) -> GoogleCloudClients:
