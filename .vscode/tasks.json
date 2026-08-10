@@ -1,0 +1,45 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "example/slackbot_frontend",
+            "command": "uv",
+            "type": "shell",
+            "args": [
+                "run",
+                "--env-file",
+                ".env",
+                "--group",
+                "slack",
+                "python",
+                "-m",
+                "example.slackbot_frontend.app",
+                "--release-config",
+                "release.example.yaml"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always"
+            },
+            "group": "build"
+        },
+        {
+            "label": "example/streamlit_frontend",
+            "command": "uv",
+            "type": "shell",
+            "args": [
+                "run",
+                "--group",
+                "streamlit",
+                "streamlit",
+                "run",
+                "example/streamlit_frontend/app.py"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always"
+            },
+            "group": "build"
+        }
+    ]
+}
