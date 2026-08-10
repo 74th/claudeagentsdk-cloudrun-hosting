@@ -1,0 +1,27 @@
+schema_version: "4"
+execution_platform: gke
+enable_cloud_run: true
+enable_cloud_batch: true
+enable_gke: true
+project_id: nnyn-dev
+region: us-central1
+firestore_location: us-central1
+firestore_database: claude-agent-chat
+bucket_name: nnyn-dev-agent-hosting-poc-us-central1
+image: us-central1-docker.pkg.dev/nnyn-dev/claude-agent/agent@sha256:af057dfac886b36bb625538e261690d054c4d04c65a7b587597441d52375f6e8
+task_timeout_seconds: 1800
+question_timeout_seconds: 300
+task_retries: 0
+retention_days: 30
+log_level: INFO
+vertex_region: us-east5
+claude_model: claude-haiku-4-5@20251001
+gke:
+  cluster: autopilot
+  cluster_region: asia-northeast1
+  namespace: claude-agent
+  ksa_name: claude-agent
+  kube_context: gke_nnyn-dev_asia-northeast1_autopilot
+  cpu: "1"
+  memory: 2Gi
+  job_ttl_seconds: 3600

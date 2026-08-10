@@ -24,10 +24,39 @@ class CloudBatchReleaseSettings(BaseModel):
     memory_mib: int = Field(default=4096, ge=1)
 
 
+class GKEReleaseSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    cluster: str = Field(min_length=1)
+    cluster_region: str = Field(min_length=1)
+    namespace: str = Field(default="claude-agent", pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+    ksa_name: str = Field(default="claude-agent", pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+    kube_context: str = Field(min_length=1)
+    cpu: str = Field(default="1", min_length=1)
+    memory: str = Field(default="2Gi", min_length=1)
+    job_ttl_seconds: int = Field(default=3600, ge=1, le=86400)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_explicit_gke_names(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        aliases = {
+            "service_account": "ksa_name",
+            "context": "kube_context",
+            "ttl_seconds": "job_ttl_seconds",
+        }
+        for source, target in aliases.items():
+            if source in normalized and target not in normalized:
+                normalized[target] = normalized.pop(source)
+        return normalized
+
+
 class ReleaseConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["2", "3"] = "3"
+    schema_version: Literal["2", "3", "4"] = "4"
     project_id: str
     region: str
     firestore_location: str
@@ -37,8 +66,10 @@ class ReleaseConfig(BaseModel):
     execution_platform: Literal["cloud-run", "cloud-batch", "gke"] = "cloud-run"
     enable_cloud_run: bool = True
     enable_cloud_batch: bool = True
+    enable_gke: bool = False
     cloud_run: CloudRunReleaseSettings = Field(default_factory=CloudRunReleaseSettings)
     cloud_batch: CloudBatchReleaseSettings = Field(default_factory=CloudBatchReleaseSettings)
+    gke: GKEReleaseSettings | None = None
     task_timeout_seconds: int = Field(default=1800, ge=1, le=86400)
     question_timeout_seconds: int = Field(default=300, ge=1, le=86400)
     task_retries: int = Field(default=0, ge=0, le=0)
@@ -52,8 +83,8 @@ class ReleaseConfig(BaseModel):
     def reject_legacy_retention_fields(cls, value: Any) -> Any:
         if isinstance(value, dict):
             value = dict(value)
-            schema_version = value.get("schema_version", "3")
-            if schema_version not in {"2", "3"}:
+            schema_version = value.get("schema_version", "4")
+            if schema_version not in {"2", "3", "4"}:
                 raise ValueError(f"unsupported release schema_version: {schema_version}")
             if schema_version == "2" and "execution_platform" not in value:
                 raise ValueError(
@@ -75,6 +106,23 @@ class ReleaseConfig(BaseModel):
                 "cloud_run" in value or "job_name" in value
             ):
                 raise ValueError("cloud-batch configuration must not contain Cloud Run settings")
+            if platform == "gke":
+                if schema_version != "4":
+                    raise ValueError(
+                        "execution_platform gke requires release schema_version 4; "
+                        "GKE is not implemented in older release schemas"
+                    )
+                if "gke" not in value:
+                    raise ValueError(
+                        "execution_platform gke requires gke settings; "
+                        "GKE is not implemented without its required configuration"
+                    )
+                if "cloud_run" in value or "job_name" in value or "cloud_batch" in value:
+                    raise ValueError(
+                        "gke configuration must not contain Cloud Run or Batch settings"
+                    )
+            elif "gke" in value:
+                raise ValueError(f"{platform} configuration must not contain gke settings")
             legacy = sorted(
                 {
                     key
@@ -104,14 +152,17 @@ class ReleaseConfig(BaseModel):
             raise ValueError("vertex_region is required")
         if not self.claude_model.startswith("claude-"):
             raise ValueError("claude_model must be a Claude Vertex AI model ID")
-        if self.execution_platform == "gke":
-            raise ValueError("execution_platform gke is reserved but not implemented")
-        if not self.enable_cloud_run and not self.enable_cloud_batch:
-            raise ValueError("at least one of enable_cloud_run or enable_cloud_batch must be true")
+        if not self.enable_cloud_run and not self.enable_cloud_batch and not self.enable_gke:
+            raise ValueError("at least one execution platform enable flag must be true")
         if self.execution_platform == "cloud-run" and not self.enable_cloud_run:
             raise ValueError("execution_platform cloud-run requires enable_cloud_run=true")
         if self.execution_platform == "cloud-batch" and not self.enable_cloud_batch:
             raise ValueError("execution_platform cloud-batch requires enable_cloud_batch=true")
+        if self.execution_platform == "gke":
+            if not self.enable_gke:
+                raise ValueError("execution_platform gke requires enable_gke=true")
+            if self.gke is None:
+                raise ValueError("execution_platform gke requires gke settings")
         forbidden = ("api_key", "password", "secret")
         if any(token in self.model_dump_json().lower() for token in forbidden):
             raise ValueError("release configuration must not contain secrets")
@@ -127,6 +178,7 @@ class ReleaseConfig(BaseModel):
             "execution_platform": self.execution_platform,
             "enable_cloud_run": self.enable_cloud_run,
             "enable_cloud_batch": self.enable_cloud_batch,
+            "enable_gke": self.enable_gke,
             "task_timeout_seconds": self.task_timeout_seconds,
             "question_timeout_seconds": self.question_timeout_seconds,
             "retention_days": self.retention_days,
@@ -143,6 +195,19 @@ class ReleaseConfig(BaseModel):
                     "batch_machine_type": self.cloud_batch.machine_type,
                     "batch_cpu_milli": self.cloud_batch.cpu_milli,
                     "batch_memory_mib": self.cloud_batch.memory_mib,
+                }
+            )
+        elif self.gke is not None:
+            values.update(
+                {
+                    "gke_cluster": self.gke.cluster,
+                    "gke_cluster_region": self.gke.cluster_region,
+                    "gke_namespace": self.gke.namespace,
+                    "gke_ksa_name": self.gke.ksa_name,
+                    "gke_kube_context": self.gke.kube_context,
+                    "gke_cpu": self.gke.cpu,
+                    "gke_memory": self.gke.memory,
+                    "gke_job_ttl_seconds": self.gke.job_ttl_seconds,
                 }
             )
         return values

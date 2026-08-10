@@ -38,7 +38,34 @@ gcloud logging read \
 
 Cloud Run と Batch の切替前には、両方の変数で refresh なしの plan を取得し、`google_firestore_database.chat` と `google_storage_bucket.workspace` に `-/+` や destroy がないことを確認します。active な run は完了またはキャンセルしてから切り替えてください。ロールバックは `execution_platform: cloud-run` と `cloud_run.job_name` を指定した設定へ戻して plan／apply します。Firestore database と GCS bucket は共通 resource address のため削除しません。
 
-`gke` は将来の予約値として認識しますが、今回の実装・example・Terraform 適用対象外です。指定するとクラウド変更前の設定検証で失敗します。
+## GKE Jobs へ切り替える
+
+GKE backend は、既存の Autopilot cluster と kubeconfig context を使って run ごとに Kubernetes Job を作成します。cluster 自体は Terraform で作成せず、namespace と KSA、KSA principal の IAM だけを管理します。まず対象 context を取得して確認します。
+
+```bash
+gcloud container clusters get-credentials autopilot \
+  --region=asia-northeast1 --project=nnyn-dev
+kubectl config current-context
+kubectl config get-contexts
+```
+
+`release.gke.yaml` の `execution_platform: gke` と `gke` block は frontend の backend 選択、`terraform/test-gke.tfvars` の `enable_gke` は基盤作成を制御します。release YAML や Terraform state に kubeconfig の内容・鍵・token を保存しません。適用前に GKE 用 plan を確認します。
+
+```bash
+uv run python scripts/deploy.py release.gke.yaml
+uv run python scripts/deploy.py release.gke.yaml --apply
+```
+
+適用後は次で namespace、KSA、Job/Pod の状態と直接 principal の IAM を確認します。
+
+```bash
+kubectl -n claude-agent get serviceaccount,jobs,pods
+gcloud projects get-iam-policy nnyn-dev \
+  --flatten='bindings[].members' \
+  --filter='bindings.members:principal://iam.googleapis.com/projects/'
+```
+
+rollback は `execution_platform: cloud-run` または `cloud-batch` の release 設定へ戻して frontend を再起動します。GKE 専用 namespace／KSA／IAM を除去する場合は active Job がないことを確認し、`enable_gke=false` の Terraform plan／apply を実行します。既存の Cloud Run／Batch を維持する場合は各 enable flag を変更しません。
 
 Cloud Run Job image は `example/Dockerfile` で build し、release 設定の image を更新して配備します。Job は `RUN_ID` だけを受け取り、入力・イベント・cancel flag は Firestore から取得します。サンプルは `example/agent`、`example/streamlit_frontend`、`example/slackbot_frontend` に分離されています。旧 `example/agent.py` と `sample_frontend` は廃止しました。
 

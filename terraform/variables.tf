@@ -4,8 +4,8 @@ variable "execution_platform" {
   description = "Runtime backend metadata; resource creation is controlled by enable flags."
   default     = "cloud-run"
   validation {
-    condition     = contains(["cloud-run", "cloud-batch"], var.execution_platform)
-    error_message = "execution_platform must be cloud-run or cloud-batch; gke is reserved."
+    condition     = contains(["cloud-run", "cloud-batch", "gke"], var.execution_platform)
+    error_message = "execution_platform must be cloud-run, cloud-batch, or gke."
   }
 }
 variable "enable_cloud_run" {
@@ -17,6 +17,11 @@ variable "enable_cloud_batch" {
   type        = bool
   description = "Keep Cloud Batch API and Batch IAM available."
   default     = true
+}
+variable "enable_gke" {
+  type        = bool
+  description = "Create only the existing-cluster namespace, KSA, and direct principal IAM for GKE Jobs."
+  default     = false
 }
 variable "region" {
   type    = string
@@ -66,6 +71,59 @@ variable "batch_memory_mib" {
   validation {
     condition     = var.batch_memory_mib >= 1
     error_message = "batch_memory_mib must be positive."
+  }
+}
+variable "gke_cluster" {
+  type        = string
+  description = "Existing GKE cluster name; Terraform does not create the cluster."
+  default     = ""
+}
+variable "gke_cluster_region" {
+  type        = string
+  description = "Existing GKE cluster region, independent of the Firestore/Cloud Run region."
+  default     = ""
+}
+variable "gke_namespace" {
+  type    = string
+  default = "claude-agent"
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", var.gke_namespace))
+    error_message = "gke_namespace must be a DNS-1123 label."
+  }
+}
+variable "gke_ksa_name" {
+  type    = string
+  default = "claude-agent"
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", var.gke_ksa_name))
+    error_message = "gke_ksa_name must be a DNS-1123 label."
+  }
+}
+variable "gke_kube_context" {
+  type        = string
+  description = "Existing kubeconfig context used by the Kubernetes provider."
+  default     = ""
+}
+variable "gke_kubeconfig" {
+  type        = string
+  description = "Optional path to the existing kubeconfig; credentials are never stored in Terraform."
+  default     = null
+  nullable    = true
+}
+variable "gke_cpu" {
+  type    = string
+  default = "1"
+}
+variable "gke_memory" {
+  type    = string
+  default = "2Gi"
+}
+variable "gke_job_ttl_seconds" {
+  type    = number
+  default = 3600
+  validation {
+    condition     = var.gke_job_ttl_seconds >= 1 && var.gke_job_ttl_seconds <= 86400
+    error_message = "gke_job_ttl_seconds must be between 1 and 86400 seconds."
   }
 }
 variable "image" { type = string }

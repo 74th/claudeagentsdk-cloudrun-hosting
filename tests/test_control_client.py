@@ -224,6 +224,28 @@ def test_cancel_commits_only_after_backend_confirms_cancelled() -> None:
     assert client.cancel(run.id).state is RunState.CANCELLED
 
 
+def test_cancel_uses_durable_request_when_provider_job_is_already_gone() -> None:
+    class MissingCancelBackend(InMemoryExecutionBackend):
+        def cancel(self, reference):
+            raise ExecutionNotFoundError("provider Job was removed after delete")
+
+    store = InMemoryChatStore()
+    client = ControlClient(store, MissingCancelBackend())
+    session = client.create_session("user")
+    run = client.reserve_and_start(
+        Run(
+            user_id="user",
+            session_id=session.id,
+            workspace_id=session.workspace_id,
+            idempotency_key="key",
+        ),
+        "hello",
+    )
+    cancelled = client.cancel(run.id)
+    assert cancelled.state is RunState.CANCELLED
+    assert cancelled.error_code == "execution_cancelled_after_deletion"
+
+
 def test_subscription_deduplicates_catchup_and_listener_boundary() -> None:
     store = InMemoryChatStore()
     client = ControlClient(store, InMemoryExecutionBackend())

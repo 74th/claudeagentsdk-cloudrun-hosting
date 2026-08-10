@@ -13,6 +13,7 @@ from .cloud_run_backend import CloudRunJobsBackend
 from .control_client import ControlClient
 from .firestore_chat_store import FirestoreChatStore
 from .firestore_codec import DEFAULT_RETENTION_DAYS
+from .gke_backend import GKEJobsBackend, KubernetesBatchClient, create_kubernetes_batch_client
 from .protocols import AgentFactory, ChatStore, Clock, ExecutionBackend, WorkspaceStore
 from .runtime import ClaudeAgentConfig, RuntimePolicy, WorkspaceInitializer, WorkspaceSetup
 
@@ -41,7 +42,7 @@ class GoogleCloudSettings:
     bucket_name: str
     job_name: str = "test-claudesdk-cloudrun"
     retention_days: int = DEFAULT_RETENTION_DAYS
-    execution_platform: Literal["cloud-run", "cloud-batch"] = "cloud-run"
+    execution_platform: Literal["cloud-run", "cloud-batch", "gke"] = "cloud-run"
     image: str = ""
     job_service_account: str | None = None
     batch_job_id_prefix: str = "claude-agent"
@@ -53,6 +54,15 @@ class GoogleCloudSettings:
     vertex_region: str = "us-east5"
     claude_model: str = "claude-haiku-4-5@20251001"
     log_level: str = "INFO"
+    gke_cluster: str = ""
+    gke_cluster_region: str = ""
+    gke_namespace: str = "claude-agent"
+    gke_ksa_name: str = "claude-agent"
+    gke_kube_context: str = ""
+    gke_kubeconfig: str | None = None
+    gke_cpu: str = "1"
+    gke_memory: str = "2Gi"
+    gke_job_ttl_seconds: int = 3600
 
     @classmethod
     def from_environment(
@@ -102,21 +112,30 @@ class GoogleCloudSettings:
                 self.bucket_name,
                 self.job_name
                 if self.execution_platform == "cloud-run"
-                else self.batch_job_id_prefix,
+                else self.batch_job_id_prefix
+                if self.execution_platform == "cloud-batch"
+                else self.gke_cluster,
             )
         ):
             raise ValueError("Google Cloud settings must not be blank")
         expected = f"projects/{self.project}/locations/{self.region}/jobs/"
         if self.job_name.startswith("projects/") and not self.job_name.startswith(expected):
             raise ValueError("Cloud Run Job resource name must match project and region")
-        if self.execution_platform not in {"cloud-run", "cloud-batch"}:
-            raise ValueError("execution_platform must be cloud-run or cloud-batch")
+        if self.execution_platform not in {"cloud-run", "cloud-batch", "gke"}:
+            raise ValueError("execution_platform must be cloud-run, cloud-batch, or gke")
         if self.batch_cpu_milli < 1 or self.batch_memory_mib < 1:
             raise ValueError("Batch CPU and memory must be positive")
         if not 1 <= self.task_timeout_seconds <= 86400:
             raise ValueError("task_timeout_seconds must be between 1 and 86400")
         if not 1 <= self.question_timeout_seconds <= 86400:
             raise ValueError("question_timeout_seconds must be between 1 and 86400")
+        if self.execution_platform == "gke":
+            if not self.gke_cluster_region or not self.gke_kube_context:
+                raise ValueError("GKE cluster region and kube context are required")
+            if not self.gke_cpu.strip() or not self.gke_memory.strip():
+                raise ValueError("GKE CPU and memory must not be blank")
+            if not 1 <= self.gke_job_ttl_seconds <= 86400:
+                raise ValueError("gke_job_ttl_seconds must be between 1 and 86400")
 
 
 @dataclass(frozen=True)
@@ -128,6 +147,7 @@ class GoogleCloudClients:
     jobs: object | None = None
     executions: object | None = None
     batch: object | None = None
+    kubernetes_batch: KubernetesBatchClient | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +228,13 @@ def create_google_cloud_clients(settings: GoogleCloudSettings) -> GoogleCloudCli
         return GoogleCloudClients(
             **clients, jobs=JobsClient(), executions=ExecutionsClient()
         )
+    if settings.execution_platform == "gke":
+        return GoogleCloudClients(
+            **clients,
+            kubernetes_batch=create_kubernetes_batch_client(
+                kubeconfig=settings.gke_kubeconfig, context=settings.gke_kube_context
+            ),
+        )
     from google.cloud.batch_v1 import BatchServiceClient
 
     return GoogleCloudClients(**clients, batch=GoogleCloudBatchClient(BatchServiceClient()))
@@ -225,6 +252,29 @@ def create_google_cloud_control_client(settings: GoogleCloudSettings) -> Control
             job_name=settings.job_name,
         )
         if settings.execution_platform == "cloud-run"
+        else GKEJobsBackend(
+            cast(KubernetesBatchClient, clients.kubernetes_batch),
+            image=settings.image,
+            namespace=settings.gke_namespace,
+            service_account=settings.gke_ksa_name,
+            cpu=settings.gke_cpu,
+            memory=settings.gke_memory,
+            task_timeout_seconds=settings.task_timeout_seconds,
+            job_ttl_seconds=settings.gke_job_ttl_seconds,
+            environment={
+                "GOOGLE_CLOUD_PROJECT": settings.project,
+                "CLAUDE_CODE_USE_VERTEX": "1",
+                "ANTHROPIC_VERTEX_PROJECT_ID": settings.project,
+                "CLOUD_ML_REGION": settings.vertex_region,
+                "CLAUDE_MODEL": settings.claude_model,
+                "LOG_LEVEL": settings.log_level,
+                "FIRESTORE_DATABASE": settings.firestore_database,
+                "WORKSPACE_BUCKET": settings.bucket_name,
+                "RUN_RETENTION_DAYS": str(settings.retention_days),
+                "QUESTION_TIMEOUT_SECONDS": str(settings.question_timeout_seconds),
+            },
+        )
+        if settings.execution_platform == "gke"
         else CloudBatchBackend(
             cast(BatchClient, clients.batch),
             project=settings.project,

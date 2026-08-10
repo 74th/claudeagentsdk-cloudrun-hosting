@@ -23,6 +23,12 @@ def validate(path: Path) -> None:
         "roles/iam.serviceAccountUser",
         "enable_cloud_run",
         "enable_cloud_batch",
+        "enable_gke",
+        "kubernetes_namespace_v1",
+        "kubernetes_service_account_v1",
+        "data \"google_project\" \"current\"",
+        "principal://iam.googleapis.com/projects/${data.google_project.current.number}",
+        'google_storage_bucket_iam_member" "gke_workspace',
     )
     missing = [value for value in required if value not in text]
     if missing:
@@ -46,3 +52,7 @@ def validate(path: Path) -> None:
         raise ValueError("Batch IAM must be conditional on enable_cloud_batch")
     if text.count("max_retries     = 0") != 1:
         raise ValueError("Cloud Run task retries must remain zero")
+    if "iam.gke.io/gcp-service-account" in text:
+        raise ValueError("GKE KSA must not impersonate a GSA")
+    if "google_service_account.gke" in text or "google_service_account_key" in text:
+        raise ValueError("GKE must not create a dedicated GSA or JSON key")

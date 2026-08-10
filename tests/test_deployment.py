@@ -20,6 +20,12 @@ def test_terraform_has_required_deployment_safeguards() -> None:
     assert "matches_prefix" not in main_tf
     assert 'value = tostring(var.retention_days)' in main_tf
     assert main_tf.count('field      = "expires_at"') == 3
+    assert 'member = local.gke_principal' in main_tf
+    assert 'resource "kubernetes_namespace_v1" "agent"' in main_tf
+    assert 'resource "kubernetes_service_account_v1" "agent"' in main_tf
+    assert 'projects/${data.google_project.current.number}' in main_tf
+    assert 'iam.gke.io/gcp-service-account' not in main_tf
+    assert 'resource "google_service_account_key"' not in main_tf
 
 
 def test_release_config_rejects_unknown_and_unsafe_job_values() -> None:
