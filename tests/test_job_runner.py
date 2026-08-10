@@ -124,7 +124,8 @@ def test_job_runner_reuses_sdk_final_event_when_committing_success() -> None:
     runner = JobRunner(store)
     assert runner.claim(invocation) is not None
     store.append_event(ChatEvent(
-        id="sdk-final", run_id=run.id, sequence=0, type="final", payload={"output": "done"}
+        id="sdk-final", run_id=run.id, sequence=0, type="final",
+        payload={"output": "done", "estimated_cost_usd": 0.012345, "duration_ms": 1234},
     ))
 
     committed = runner.commit_success(
@@ -136,6 +137,8 @@ def test_job_runner_reuses_sdk_final_event_when_committing_success() -> None:
 
     assert committed.state is RunState.COMPLETED
     assert [event.id for event in store.list_events(run.id)] == ["input", "sdk-final"]
+    assert store.list_events(run.id)[-1].payload["estimated_cost_usd"] == 0.012345
+    assert store.list_events(run.id)[-1].payload["duration_ms"] == 1234
 
 
 def test_unsuccessful_commit_discards_uncommitted_snapshot() -> None:

@@ -99,6 +99,12 @@ uv run python -m example.slackbot_frontend.app --release-config release.example.
 
 Bot はイベントを即時 acknowledge し、バックグラウンドで run を開始します。処理中は同じステータスメッセージを作業内容と終端状態へ更新し、完了後は最終回答を新しいスレッド返信として投稿するため、Slack の通知を受け取れます。長い最終回答はSlackのメッセージ上限を超えないよう分割します。team/channel/thread とアプリケーション user/session の対応は release config の named Firestore database 内へ保存されるため、再起動後も同じスレッドを継続できます。Slack event ID を idempotency key に使い、Bot 自身の投稿は無視します。
 
+### 推定費用と処理時間
+
+run の完了結果または失敗結果に、取得できた場合だけ `推定価格 (USD)` と `処理時間 (SDK)` を表示します。費用は Claude Agent SDK の `total_cost_usd` に基づく推定値、処理時間は SDK の `duration_ms` に基づく値であり、Cloud Run のキュー待ち・workspace 復元・snapshot 保存を含む run 全体の経過時間ではありません。SDK が値を返さない場合は 0 で補完せず、その項目を表示しません。
+
+Web Search の費用は、Claude Agent SDK の推定総額に含まれる範囲でそのまま扱い、アプリケーション独自の検索単価を加算しません。表示値は参考値であり正式な請求額ではないため、正式な請求・利用量の確認には Google Cloud Billing を参照してください。
+
 ### 対話質問とタスク進捗のデモ
 
 Streamlit または Slack の入力に、エージェントへ選択を求める指示とタスク作成を促す内容（例: 「作業方針を選んで、確認しながら実行して」）を送ります。質問が表示されたら、定義済みの選択肢を 1 つ選ぶか、複数選択では複数項目を選びます。「その他」を選んだ場合は自由入力欄へ回答を入力します。Streamlit は回答ボタンを押すと同じ質問 ID を再送せず、Slack は表示された番号（単一選択は `1`、複数選択は `1,3`）または任意の自由入力を同じスレッドへ返信します。

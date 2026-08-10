@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from numbers import Real
 from typing import Any
 from uuid import UUID
 
@@ -63,6 +65,51 @@ class InteractionState:
         return [self.tasks[key] for key in self.task_order if key in self.tasks]
 
 
+@dataclass(frozen=True)
+class ProcessingMetadata:
+    """共通イベントから取り出したSDK処理メタデータ。"""
+
+    estimated_cost_usd: int | float | None = None
+    duration_ms: int | float | None = None
+
+    @property
+    def display_lines(self) -> tuple[str, ...]:
+        lines: list[str] = []
+        if self.estimated_cost_usd is not None:
+            lines.append(f"推定価格 (USD): ${self.estimated_cost_usd:.6f}")
+        if self.duration_ms is not None:
+            lines.append(f"処理時間 (SDK): {self.duration_ms / 1000:.2f}秒")
+        return tuple(lines)
+
+    @property
+    def display_text(self) -> str:
+        return "\n".join(self.display_lines)
+
+
+def _valid_processing_number(value: Any) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
+def parse_processing_metadata(payload: dict[str, Any]) -> ProcessingMetadata:
+    """終端イベントpayloadの任意メタデータを安全な共通値へ変換する。"""
+    return ProcessingMetadata(
+        estimated_cost_usd=_valid_processing_number(payload.get("estimated_cost_usd")),
+        duration_ms=_valid_processing_number(payload.get("duration_ms")),
+    )
+
+
+processing_metadata = parse_processing_metadata
+
+
+def format_processing_metadata(metadata: ProcessingMetadata) -> str:
+    """共通の利用者向け処理メタデータ表示を返す。"""
+    return metadata.display_text
+
+
 class CommonChatEvent:
     """すべてのフロントエンドで扱えるイベント値。
 
@@ -71,7 +118,8 @@ class CommonChatEvent:
     """
 
     __slots__ = (
-        "id", "run_id", "sequence", "kind", "raw_type", "payload", "content", "question"
+        "id", "run_id", "sequence", "kind", "raw_type", "payload", "content", "question",
+        "processing_metadata",
     )
 
     def __init__(
@@ -85,6 +133,7 @@ class CommonChatEvent:
         payload: dict[str, Any],
         content: str | None,
         question: QuestionRequest | None = None,
+        processing_metadata: ProcessingMetadata | None = None,
     ) -> None:
         self.id = id
         self.run_id = run_id
@@ -94,6 +143,7 @@ class CommonChatEvent:
         self.payload = dict(payload)
         self.content = content
         self.question = question
+        self.processing_metadata = processing_metadata or parse_processing_metadata(self.payload)
 
     @property
     def type(self) -> str:
@@ -126,6 +176,7 @@ class CommonChatEvent:
             self.payload,
             self.content,
             self.question,
+            self.processing_metadata,
         ) == (
             other.id,
             other.run_id,
@@ -135,6 +186,7 @@ class CommonChatEvent:
             other.payload,
             other.content,
             other.question,
+            other.processing_metadata,
         )
 
 
@@ -176,6 +228,7 @@ def normalize_event(event: ChatEvent) -> CommonChatEvent:
         payload=event.payload,
         content=_content(event.type, event.payload),
         question=question,
+        processing_metadata=parse_processing_metadata(event.payload),
     )
 
 

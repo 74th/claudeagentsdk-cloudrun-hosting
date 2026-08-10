@@ -4,10 +4,13 @@ from .events import (
     ChatEventKind,
     CommonChatEvent,
     InteractionState,
+    ProcessingMetadata,
     TaskState,
+    format_processing_metadata,
     interaction_state,
     normalize_event,
     normalize_events,
+    processing_metadata,
     reduce_tasks,
 )
 from .identity import IdentityProvider, StaticIdentity
@@ -19,6 +22,7 @@ __all__ = [
     "ChatStartResult",
     "CommonChatEvent",
     "InteractionState",
+    "ProcessingMetadata",
     "TaskState",
     "IdentityProvider",
     "StaticIdentity",
@@ -27,4 +31,6 @@ __all__ = [
     "normalize_events",
     "interaction_state",
     "reduce_tasks",
+    "processing_metadata",
+    "format_processing_metadata",
 ]

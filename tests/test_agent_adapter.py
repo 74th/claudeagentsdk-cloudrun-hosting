@@ -15,11 +15,17 @@ class FakeOptions:
 
 
 class FakeResultMessage:
+    default_total_cost_usd: object = None
+    default_duration_ms: object = None
+    default_is_error = False
+
     def __init__(self, session_id: str, result: str) -> None:
         self.session_id = session_id
         self.result = result
-        self.is_error = False
+        self.is_error = self.default_is_error
         self.uuid = "result-1"
+        self.total_cost_usd = self.default_total_cost_usd
+        self.duration_ms = self.default_duration_ms
 
 
 @pytest.fixture
@@ -101,6 +107,86 @@ async def test_agent_logs_sdk_start_message_and_result(
     )
     assert "claude_sdk.query.start model=test-model resume=False" in caplog.text
     assert "claude_sdk.query.result position=0 is_error=False" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_result_message_metadata_is_persisted_on_final_event(
+    tmp_path: Path, fake_sdk: list[FakeOptions], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeResultMessage, "default_total_cost_usd", 0.012345)
+    monkeypatch.setattr(FakeResultMessage, "default_duration_ms", 1234)
+    adapter = ClaudeAgentAdapter(model="test-model")
+
+    events = [
+        event
+        async for event in adapter.events(
+            prompt="hello", workspace=tmp_path, transcript_dir=tmp_path / "transcript"
+        )
+    ]
+
+    assert events[-1]["event_type"] == "final"
+    assert events[-1]["payload"] == {
+        "output": "done",
+        "estimated_cost_usd": 0.012345,
+        "duration_ms": 1234,
+    }
+
+
+@pytest.mark.asyncio
+async def test_result_message_metadata_omits_invalid_values(
+    tmp_path: Path, fake_sdk: list[FakeOptions], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeResultMessage, "default_total_cost_usd", float("nan"))
+    monkeypatch.setattr(FakeResultMessage, "default_duration_ms", -1)
+    adapter = ClaudeAgentAdapter(model="test-model")
+
+    events = [
+        event
+        async for event in adapter.events(
+            prompt="hello", workspace=tmp_path, transcript_dir=tmp_path / "transcript"
+        )
+    ]
+
+    assert events[-1]["payload"] == {"output": "done"}
+
+
+@pytest.mark.asyncio
+async def test_error_result_keeps_available_metadata(
+    tmp_path: Path, fake_sdk: list[FakeOptions], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeResultMessage, "default_is_error", True)
+    monkeypatch.setattr(FakeResultMessage, "default_total_cost_usd", 0.045)
+    monkeypatch.setattr(FakeResultMessage, "default_duration_ms", None)
+    adapter = ClaudeAgentAdapter(model="test-model")
+
+    events = [
+        event
+        async for event in adapter.events(
+            prompt="hello", workspace=tmp_path, transcript_dir=tmp_path / "transcript"
+        )
+    ]
+
+    assert events[-1]["event_type"] == "error"
+    assert events[-1]["payload"] == {"output": "done", "estimated_cost_usd": 0.045}
+
+
+@pytest.mark.asyncio
+async def test_sdk_total_cost_is_used_as_is_for_search_inclusive_estimate(
+    tmp_path: Path, fake_sdk: list[FakeOptions], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The SDK total already represents the whole query, including Web Search.
+    monkeypatch.setattr(FakeResultMessage, "default_total_cost_usd", 0.123456)
+    monkeypatch.setattr(FakeResultMessage, "default_duration_ms", 2000)
+    adapter = ClaudeAgentAdapter(model="test-model")
+
+    events = [
+        event
+        async for event in adapter.events(
+            prompt="hello", workspace=tmp_path, transcript_dir=tmp_path / "transcript"
+        )
+    ]
+
+    assert events[-1]["payload"]["estimated_cost_usd"] == 0.123456
 
 
 def test_sdk_messages_are_normalised_with_stable_event_ids() -> None:

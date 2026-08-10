@@ -1,4 +1,5 @@
 import inspect
+from contextlib import nullcontext
 from uuid import uuid4
 
 from cas_hosting_adapter.control_client import ControlClient
@@ -15,6 +16,7 @@ from example.streamlit_frontend.app import (
     DynamicRenderState,
     ManualIdentity,
     RefreshScope,
+    _render_history,
     auto_refresh_allowed,
     create_view_from_release_config,
     decide_refresh_scope,
@@ -26,6 +28,24 @@ from example.streamlit_frontend.app import (
     should_open_initial_draft,
     split_history,
 )
+
+
+class RecordingStreamlit:
+    def __init__(self) -> None:
+        self.captions: list[str] = []
+        self.errors: list[str] = []
+
+    def chat_message(self, _role: str):
+        return nullcontext()
+
+    def write(self, _value) -> None:
+        return None
+
+    def caption(self, value: str) -> None:
+        self.captions.append(value)
+
+    def error(self, value: str) -> None:
+        self.errors.append(value)
 
 
 def _session_and_run(state: RunState = RunState.RUNNING):
@@ -343,6 +363,42 @@ def test_history_does_not_render_streamed_answer_again_as_final_result() -> None
         ("user", {"content": "summarize this"}),
         ("final", {"output": answer}),
     ]
+
+
+def test_streamlit_renders_metadata_for_final_and_error_events_without_zero_fill() -> None:
+    run_id = uuid4()
+    rendered = RecordingStreamlit()
+    _render_history(
+        rendered,
+        normalize_events(
+            [
+                ChatEvent(
+                    id="final-with-metadata",
+                    run_id=run_id,
+                    sequence=1,
+                    type="final",
+                    payload={
+                        "output": "done",
+                        "estimated_cost_usd": 0.012345,
+                        "duration_ms": 1234,
+                    },
+                ),
+                ChatEvent(
+                    id="error-without-cost",
+                    run_id=run_id,
+                    sequence=2,
+                    type="error",
+                    payload={"output": "failed", "duration_ms": 2500},
+                ),
+            ]
+        ),
+    )
+
+    assert rendered.captions == [
+        "推定価格 (USD): $0.012345\n処理時間 (SDK): 1.23秒",
+        "処理時間 (SDK): 2.50秒",
+    ]
+    assert rendered.errors == ["failed"]
 
 
 def test_history_reclassifies_legacy_tool_result_stored_as_user_event() -> None:

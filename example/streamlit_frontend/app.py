@@ -362,6 +362,12 @@ def _render_history(
         elif event.type in {"agent", "final"}:
             with st.chat_message("assistant"):
                 st.write(event.content or "")
+                if event.type == "final" and event.processing_metadata.display_text:
+                    st.caption(event.processing_metadata.display_text)
+        elif event.type == "error":
+            st.error(event.content or "処理に失敗しました。")
+            if event.processing_metadata.display_text:
+                st.caption(event.processing_metadata.display_text)
         elif event.type == "tool_started":
             with st.status(f"実行中: {event.payload.get('name') or 'ツール'}", expanded=False):
                 st.json(event.payload.get("input", {}))

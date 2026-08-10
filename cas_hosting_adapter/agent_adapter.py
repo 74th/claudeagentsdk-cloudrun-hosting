@@ -6,9 +6,11 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 from collections.abc import AsyncIterator, Mapping
+from numbers import Real
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -31,6 +33,27 @@ from .workspace_store import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _non_negative_finite_number(value: Any) -> int | float | None:
+    """Return SDK numeric metadata only when it is safe to persist."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value if isinstance(value, int) else float(value)
+
+
+def _result_metadata(message: Any) -> dict[str, int | float]:
+    """Extract optional cost and integer SDK duration from a ResultMessage."""
+    payload: dict[str, int | float] = {}
+    cost = _non_negative_finite_number(getattr(message, "total_cost_usd", None))
+    if cost is not None:
+        payload["estimated_cost_usd"] = cost
+    duration = getattr(message, "duration_ms", None)
+    if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0:
+        payload["duration_ms"] = duration
+    return payload
 
 
 class AskUserQuestionBroker:
@@ -642,7 +665,8 @@ class ClaudeAgentAdapter:
                         message.is_error,
                     )
                     event_type = "error" if message.is_error else "final"
-                    payload = {"output": message.result}
+                    payload: dict[str, Any] = {"output": message.result}
+                    payload.update(_result_metadata(message))
                     yield {
                         "event_id": self._event_id(
                             message=message,

@@ -11,7 +11,7 @@ from threading import Event, Lock, Thread
 from typing import Any
 
 from cas_hosting_adapter.models import QuestionRequest
-from example.chat import ChatService, normalize_events
+from example.chat import ChatService, ProcessingMetadata, normalize_events
 
 from .store import SlackThreadKey, SlackThreadSessionStore, application_user_id
 
@@ -215,6 +215,7 @@ class SlackMessageHandler:
         activity: list[str] = []
         tool_names: dict[str, str] = {}
         terminal_state: str | None = None
+        processing = ProcessingMetadata()
         presented_questions: set[str] = set()
         task_lines: list[str] = []
         last_update = 0.0
@@ -281,10 +282,18 @@ class SlackMessageHandler:
                 )
             if event.type == "agent" and event.content:
                 streamed_text += event.content
-            elif event.type == "final" and event.content:
+            elif event.type == "final":
                 # Agent chunks are useful while streaming, but the final event
                 # is the canonical answer and must not be appended twice.
-                final_text = event.content
+                if event.content:
+                    final_text = event.content
+                if event.processing_metadata.display_text:
+                    processing = event.processing_metadata
+            elif event.type == "error":
+                if event.content:
+                    activity.append(f"エラー: {event.content}")
+                if event.processing_metadata.display_text:
+                    processing = event.processing_metadata
             elif event.type == "tool_started":
                 name = str(event.payload.get("name") or "tool")
                 tool_id = str(event.payload.get("tool_id") or "")
@@ -317,7 +326,9 @@ class SlackMessageHandler:
                     ]
                 except Exception:
                     task_lines = []
-            message = self._compose_message(activity, "", terminal_state, task_lines)
+            message = self._compose_message(
+                activity, "", terminal_state, task_lines, processing_metadata=processing
+            )
             if message and (now - last_update >= self._update_interval or terminal):
                 self._update(client, response, message)
                 LOGGER.info("slack.reply.updated run_id=%s length=%d", run.id, len(message))
@@ -328,8 +339,16 @@ class SlackMessageHandler:
             # answer is not lost at that boundary.
             try:
                 for saved in normalize_events(service.events(run.id)):
-                    if saved.type == "final" and saved.content:
-                        final_text = saved.content
+                    if saved.type == "final":
+                        if saved.content:
+                            final_text = saved.content
+                        if saved.processing_metadata.display_text:
+                            processing = saved.processing_metadata
+                    elif saved.type == "error":
+                        if saved.content:
+                            activity.append(f"エラー: {saved.content}")
+                        if saved.processing_metadata.display_text:
+                            processing = saved.processing_metadata
                     elif saved.type == "agent" and saved.content and not streamed_text:
                         streamed_text += saved.content
                     elif saved.type == "tool_started":
@@ -348,13 +367,18 @@ class SlackMessageHandler:
                 terminal_state = service.get_run(run.session_id, run.id).state.value
             except Exception:
                 LOGGER.debug("slack.run.state_unavailable run_id=%s", run.id)
-        message = self._compose_message(activity, "", terminal_state, task_lines)
+        message = self._compose_message(
+            activity, "", terminal_state, task_lines, processing_metadata=processing
+        )
         final_message = message or "処理が完了しました。"
         self._update(client, response, final_message)
         LOGGER.info("slack.reply.updated run_id=%s length=%d", run.id, len(final_message))
         answer = final_text or streamed_text
         if answer.strip():
-            for part_number, part in enumerate(self._split_text(f"最終結果:\n{answer}"), 1):
+            result = f"最終結果:\n{answer}"
+            if processing.display_text:
+                result = f"{result}\n\n{processing.display_text}"
+            for part_number, part in enumerate(self._split_text(result), 1):
                 self._post(client, key, part)
                 LOGGER.info(
                     "slack.final.reply.posted run_id=%s part=%d length=%d",
@@ -367,6 +391,7 @@ class SlackMessageHandler:
     def _compose_message(
         activity: list[str], result: str, terminal_state: str | None,
         tasks: list[str] | None = None,
+        *, processing_metadata: ProcessingMetadata | None = None,
     ) -> str:
         """作業履歴と結果を Slack の安全な長さへ整形する。"""
         activity_text = "\n".join(dict.fromkeys(activity))
@@ -375,8 +400,11 @@ class SlackMessageHandler:
         if task_text:
             prefix = "\n\n".join(part for part in (prefix, f"タスク:\n{task_text}") if part)
         result_text = f"最終結果:\n{result}" if result else ""
+        metadata_text = processing_metadata.display_text if processing_metadata else ""
         state_text = f"実行終了: {terminal_state}" if terminal_state else ""
-        suffix = "\n\n".join(part for part in (result_text, state_text) if part)
+        suffix = "\n\n".join(
+            part for part in (result_text, metadata_text, state_text) if part
+        )
         if prefix and suffix:
             available = MAX_SLACK_TEXT_LENGTH - len(suffix) - 2
             prefix = SlackMessageHandler._truncate(prefix, max(0, available))

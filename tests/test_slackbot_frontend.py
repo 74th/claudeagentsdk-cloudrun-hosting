@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from cas_hosting_adapter.models import (
+    ChatEvent,
     QuestionOption,
     QuestionRequest,
     QuestionState,
@@ -60,7 +61,11 @@ class FakeService:
             sequence=2,
             kind=ChatEventKind.FINAL,
             raw_type="final",
-            payload={"output": "応答"},
+            payload={
+                "output": "応答",
+                "estimated_cost_usd": 0.012345,
+                "duration_ms": 1234,
+            },
             content="応答",
         )
 
@@ -185,6 +190,7 @@ def test_slack_handler_acknowledges_immediately_and_continues_thread() -> None:
     assert client.updates
     assert "実行終了" not in client.updates[-1]["text"]
     assert any("最終結果:\n応答" in post["text"] for post in client.posts)
+    assert any("推定価格 (USD): $0.012345" in post["text"] for post in client.posts)
     key = SlackThreadKey("T-team", "C-channel", "1.0")
     binding = store.get(key)
     assert binding is not None
@@ -243,6 +249,69 @@ def test_slack_message_keeps_result_and_respects_length_limit() -> None:
 
     assert len(message) <= 3900
     assert "最終結果:\n最終回答です" in message
+
+
+def test_slack_history_fallback_appends_metadata_to_final_result() -> None:
+    class HistoryFallbackService(FakeService):
+        def __init__(self, user_id: str) -> None:
+            super().__init__(user_id, [])
+            self.started_run: Run | None = None
+
+        def start(self, prompt: str, **kwargs):
+            result = super().start(prompt, **kwargs)
+            self.started_run = result.run
+            return result
+
+        def stream(self, run):
+            yield CommonChatEvent(
+                id="terminal",
+                run_id=run.id,
+                sequence=2,
+                kind=ChatEventKind.TERMINAL,
+                raw_type="terminal",
+                payload={"state": "completed"},
+                content=None,
+            )
+
+        def events(self, run_id):
+            return [
+                ChatEvent(
+                    id="saved-final",
+                    run_id=run_id,
+                    sequence=1,
+                    type="final",
+                    payload={
+                        "output": "履歴回答",
+                        "estimated_cost_usd": 0.000001,
+                        "duration_ms": 10,
+                    },
+                )
+            ]
+
+    service = HistoryFallbackService("app-user")
+    client = FakeSlackClient()
+    handler = SlackMessageHandler(
+        lambda _user_id: service,
+        InMemorySlackThreadSessionStore(),
+        bot_user_id="B-bot",
+        update_interval=0,
+        executor=DirectExecutor(),
+    )
+    key = SlackThreadKey("T-team", "C-channel", "1.0")
+    response = client.chat_postMessage(
+        channel=key.channel_id, thread_ts=key.thread_ts, text="working"
+    )
+
+    handler._consume(
+        service,
+        Run(user_id="app-user", session_id="s", workspace_id="w", idempotency_key="k"),
+        client,
+        key,
+        response,
+    )
+
+    assert any("推定価格 (USD): $0.000001" in post["text"] for post in client.posts)
+    assert any("処理時間 (SDK): 0.01秒" in post["text"] for post in client.posts)
 
 
 def test_slack_handler_posts_durable_pending_question() -> None:
