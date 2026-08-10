@@ -9,6 +9,7 @@ cas_hosting_adapter/errors.py
 cas_hosting_adapter/factory.py
 cas_hosting_adapter/firestore_chat_store.py
 cas_hosting_adapter/firestore_codec.py
+cas_hosting_adapter/gke_backend.py
 cas_hosting_adapter/google_adapters.py
 cas_hosting_adapter/in_memory_chat_store.py
 cas_hosting_adapter/job_runner.py
@@ -18,6 +19,7 @@ cas_hosting_adapter/models.py
 cas_hosting_adapter/protocols.py
 cas_hosting_adapter/release_config.py
 cas_hosting_adapter/retry.py
+cas_hosting_adapter/runtime.py
 cas_hosting_adapter/terraform_validation.py
 cas_hosting_adapter/workspace_store.py
 cas_hosting_adapter.egg-info/PKG-INFO
@@ -47,8 +49,10 @@ scripts/backfill_firestore_ttl.py
 scripts/deploy.py
 scripts/validate_terraform.py
 tests/test_agent_adapter.py
+tests/test_agent_job_runtime.py
 tests/test_backfill_firestore_ttl.py
 tests/test_chat_cli.py
+tests/test_chat_events.py
 tests/test_chat_service.py
 tests/test_cloud_batch_backend.py
 tests/test_cloud_run_backend.py
@@ -64,12 +68,14 @@ tests/test_firestore_codec.py
 tests/test_firestore_live.py
 tests/test_google_cloud_live.py
 tests/test_in_memory_chat_store.py
+tests/test_interactive_question_and_tasks.py
 tests/test_job_runner.py
 tests/test_lifecycle.py
 tests/test_logging.py
 tests/test_ports.py
 tests/test_provider_models.py
 tests/test_release_config.py
+tests/test_runtime_contract.py
 tests/test_sample_frontend.py
 tests/test_slackbot_frontend.py
 tests/test_workspace_store.py

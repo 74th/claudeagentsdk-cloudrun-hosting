@@ -187,7 +187,21 @@ class ControlClient:
     def cancel(self, run_id: UUID) -> Run:
         run = self._chat_store.request_cancel(run_id)
         if run.execution is not None:
-            state = self._execution_backend.cancel(run.execution)
+            try:
+                state = self._execution_backend.cancel(run.execution)
+            except ExecutionNotFoundError:
+                # request_cancel is durable and precedes provider deletion. If a
+                # foreground delete has already removed the provider object,
+                # the durable cancel request is the source of truth.
+                lease = self._chat_store.acquire_reconciliation_lease(run_id, "control-cancel")
+                if lease is None:
+                    return self._chat_store.get_run_for_job(run_id)
+                return self._chat_store.reconcile_terminal(
+                    run_id,
+                    "control-cancel",
+                    RunState.CANCELLED,
+                    error_code="execution_cancelled_after_deletion",
+                )
             if state is ExecutionState.CANCELLED:
                 lease = self._chat_store.acquire_reconciliation_lease(run_id, "control-cancel")
                 if lease is None:

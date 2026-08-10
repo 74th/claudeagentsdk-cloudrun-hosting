@@ -85,6 +85,10 @@ class ExecutionPermissionError(HostingError):
     detail = ErrorDetail("execution_permission_denied", False, "execution")
 
 
+class ExecutionConflictError(HostingError):
+    detail = ErrorDetail("execution_conflict", False, "execution")
+
+
 class ExecutionQuotaError(HostingError):
     detail = ErrorDetail("execution_quota_exceeded", True, "execution")
 

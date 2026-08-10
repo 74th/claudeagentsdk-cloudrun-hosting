@@ -74,6 +74,58 @@ def test_release_config_rejects_unsupported_platform_and_mixed_settings() -> Non
         ReleaseConfig(**common, execution_platform="cloud-batch", job_name="run")
 
 
+def test_gke_release_config_keeps_cluster_location_independent() -> None:
+    config = ReleaseConfig(
+        schema_version="4",
+        project_id="nnyn-dev",
+        region="us-central1",
+        firestore_location="us-central1",
+        firestore_database="claude-agent-chat",
+        bucket_name="bucket",
+        image="image",
+        execution_platform="gke",
+        enable_cloud_run=True,
+        enable_cloud_batch=True,
+        enable_gke=True,
+        gke={
+            "cluster": "autopilot",
+            "cluster_region": "asia-northeast1",
+            "namespace": "claude-agent",
+            "ksa_name": "claude-agent",
+            "kube_context": "gke_nnyn-dev_asia-northeast1_autopilot",
+        },
+    )
+    variables = config.terraform_variables()
+    assert variables["gke_cluster_region"] == "asia-northeast1"
+    assert variables["region"] == "us-central1"
+    assert variables["enable_gke"] is True
+
+
+def test_gke_requires_its_enable_flag_and_rejects_secrets() -> None:
+    common = {
+        "schema_version": "4",
+        "project_id": "p",
+        "region": "us-central1",
+        "firestore_location": "us-central1",
+        "firestore_database": "claude-agent-chat",
+        "bucket_name": "bucket",
+        "image": "image",
+        "execution_platform": "gke",
+        "gke": {
+            "cluster": "autopilot",
+            "cluster_region": "asia-northeast1",
+            "kube_context": "context",
+        },
+    }
+    with pytest.raises(ValueError, match="requires enable_gke"):
+        ReleaseConfig(**common)
+    with pytest.raises(ValueError):
+        secret_values = dict(common)
+        secret_values["enable_gke"] = True
+        secret_values["gke"] = {**common["gke"], "api_key": "secret"}
+        ReleaseConfig(**secret_values)
+
+
 def test_release_config_keeps_both_terraform_platforms_enabled_by_default() -> None:
     config = ReleaseConfig(
         project_id="p",
