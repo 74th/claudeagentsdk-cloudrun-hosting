@@ -10,6 +10,7 @@ import math
 import os
 import shutil
 from collections.abc import AsyncIterator, Mapping
+from datetime import UTC
 from numbers import Real
 from pathlib import Path
 from typing import Any
@@ -17,12 +18,14 @@ from uuid import UUID
 
 from .errors import AgentError, AgentQuestionTimeoutError
 from .job_runner import ExecutionLimits, JobInvocation, JobRunner
-from .models import QuestionOption, QuestionRequest, QuestionState, RunState
+from .models import QuestionOption, QuestionRequest, QuestionState, Run, RunState
 from .protocols import ChatStore
 from .runtime import (
     AgentExecutionResult,
+    AgentUsageRecord,
     ClaudeAgentConfig,
     RuntimePolicy,
+    UsageHook,
     WorkspaceInitializer,
     WorkspaceSetup,
 )
@@ -252,6 +255,7 @@ class ClaudeAgentAdapter:
         question_store: ChatStore | None = None,
         run_id: UUID | None = None,
         question_timeout: float | None = None,
+        usage_hook: UsageHook | None = None,
     ) -> None:
         # Kept only for source compatibility with the previous factory.  The SDK
         # module is imported inside events() so each JobRunner process owns its
@@ -284,6 +288,7 @@ class ClaudeAgentAdapter:
         self.run_id = run_id
         self.question_timeout = self.runtime_policy.question_timeout
         self._session_executor = _ClaudeSessionExecutor(self)
+        self.usage_hook = usage_hook
 
     def _options(
         self,
@@ -375,9 +380,11 @@ class ClaudeAgentAdapter:
         if claimed is None:
             return 0
         result: AgentExecutionResult | None = None
+        session_name = ""
         try:
             prompt = runner.prompt_for_run(invocation.run_id)
             session = self.chat_store.get_session(claimed.user_id, claimed.session_id)
+            session_name = session.title
             with request_directories() as directories:
                 if session.snapshot is not None:
                     # Existing snapshots contain the archive created by the
@@ -478,14 +485,14 @@ class ClaudeAgentAdapter:
                 if result.status == "completed":
                     if snapshot is None:
                         raise AgentError("completed execution has no workspace snapshot")
-                    runner.commit_success(
+                    committed = runner.commit_success(
                         invocation,
                         result=result.output or "",
                         snapshot=snapshot,
                         claude_session_id=result.claude_session_id,
                     )
                 else:
-                    runner.commit_unsuccessful(
+                    committed = runner.commit_unsuccessful(
                         invocation,
                         {
                             "cancelled": RunState.CANCELLED,
@@ -495,17 +502,57 @@ class ClaudeAgentAdapter:
                         snapshot=snapshot,
                         claude_session_id=result.claude_session_id,
                     )
+                self._notify_usage(committed, session_name)
         except Exception as error:
             LOGGER.exception("job.lifecycle.failed run_id=%s", invocation.run_id)
             try:
-                runner.commit_unsuccessful(
+                committed = runner.commit_unsuccessful(
                     invocation, state=RunState.FAILED,
                     error_code=getattr(error, "code", "job_failed"),
                 )
+                self._notify_usage(committed, session_name)
             except Exception:
                 LOGGER.exception("job.lifecycle.failure_commit_failed run_id=%s", invocation.run_id)
             return 1
         return 0 if result is not None and result.status == "completed" else 1
+
+    def _notify_usage(self, run: Run, session_name: str) -> None:
+        """Notify the optional hook after a durable terminal commit."""
+        if self.usage_hook is None or run.finished_at is None:
+            return
+        assert self.chat_store is not None
+        cost: int | float | None = None
+        duration_ms: int | None = None
+        for event in reversed(self.chat_store.list_events(run.id)):
+            if event.type not in {"final", "error"}:
+                continue
+            cost = _non_negative_finite_number(event.payload.get("estimated_cost_usd"))
+            raw_duration = event.payload.get("duration_ms")
+            if (
+                isinstance(raw_duration, int)
+                and not isinstance(raw_duration, bool)
+                and raw_duration >= 0
+            ):
+                duration_ms = raw_duration
+            break
+        recorded_at = run.finished_at
+        if recorded_at.tzinfo is None:
+            recorded_at = recorded_at.replace(tzinfo=UTC)
+        else:
+            recorded_at = recorded_at.astimezone(UTC)
+        try:
+            self.usage_hook(
+                AgentUsageRecord(
+                    user_name=run.user_id,
+                    run_id=run.id,
+                    session_name=session_name,
+                    estimated_cost_usd=cost,
+                    recorded_at=recorded_at,
+                    duration_ms=duration_ms,
+                )
+            )
+        except Exception:
+            LOGGER.exception("agent.usage_hook.failed run_id=%s", run.id)
 
     @staticmethod
     def _event_id(

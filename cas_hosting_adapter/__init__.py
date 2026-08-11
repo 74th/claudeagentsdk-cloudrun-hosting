@@ -14,9 +14,11 @@ from .models import (
 from .runtime import (
     AgentConfig,
     AgentExecutionResult,
+    AgentUsageRecord,
     ClaudeAgentConfig,
     ExecutionResult,
     RuntimePolicy,
+    UsageHook,
     WorkspaceInitializer,
     WorkspaceSetup,
 )
@@ -24,10 +26,12 @@ from .runtime import (
 __all__ = [
     "ControlClient",
     "AgentExecutionResult",
+    "AgentUsageRecord",
     "AgentConfig",
     "ClaudeAgentConfig",
     "ExecutionResult",
     "RuntimePolicy",
+    "UsageHook",
     "WorkspaceInitializer",
     "WorkspaceSetup",
     "InitialSessionResult",

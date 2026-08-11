@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
 WorkspaceInitializer = Callable[[Path], None]
 WorkspaceSetup = Callable[[Path], None]
@@ -35,6 +36,21 @@ class ClaudeAgentConfig:
         for tool in self.allowed_tools:
             if isinstance(tool, str) and not tool.strip():
                 raise ValueError("allowed_tools must not contain blank names")
+
+
+@dataclass(frozen=True)
+class AgentUsageRecord:
+    """Immutable, provider-neutral usage data for one terminal agent run."""
+
+    user_name: str
+    run_id: UUID
+    session_name: str
+    estimated_cost_usd: int | float | None
+    recorded_at: datetime
+    duration_ms: int | None
+
+
+UsageHook = Callable[[AgentUsageRecord], None]
 
 
 @dataclass(frozen=True)

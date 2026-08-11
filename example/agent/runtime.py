@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 from pathlib import Path
 
-from cas_hosting_adapter import ClaudeAgentConfig
+from cas_hosting_adapter import AgentUsageRecord, ClaudeAgentConfig
 from cas_hosting_adapter.factory import create_google_cloud_job_composition
 
 AGENT = ClaudeAgentConfig(
@@ -17,6 +19,15 @@ AGENT = ClaudeAgentConfig(
     model=os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5@20251001"),
     allowed_tools=("Read", "Write", "Edit", "Bash", "AskUserQuestion"),
 )
+LOGGER = logging.getLogger(__name__)
+
+
+def log_agent_usage(record: AgentUsageRecord) -> None:
+    LOGGER.info("agent_usage %s", json.dumps({
+        "user_name": record.user_name, "run_id": str(record.run_id),
+        "session_name": record.session_name, "estimated_cost_usd": record.estimated_cost_usd,
+        "recorded_at": record.recorded_at.isoformat(), "duration_ms": record.duration_ms,
+    }, ensure_ascii=False, separators=(",", ":")))
 
 
 def setup_workspace(workspace: Path) -> None:
@@ -34,6 +45,7 @@ async def run() -> int:
     return await composition.run_from_environment(
         AGENT,
         workspace_setup=setup_workspace,
+        usage_hook=log_agent_usage,
     )
 
 
