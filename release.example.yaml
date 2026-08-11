@@ -2,12 +2,13 @@ schema_version: "3"
 execution_platform: cloud-run
 enable_cloud_run: true
 enable_cloud_batch: true
+enable_gke: true
 project_id: nnyn-dev
 region: us-central1
 firestore_location: us-central1
 firestore_database: claude-agent-chat
 bucket_name: nnyn-dev-agent-hosting-poc-us-central1
-image: us-central1-docker.pkg.dev/nnyn-dev/claude-agent/agent@sha256:11d2b03f94442e425e9bc080aca7842d450d38fc26ecf5fee3284e6afad77821
+image: us-central1-docker.pkg.dev/nnyn-dev/claude-agent/agent@sha256:1a1508b4c1416ca13a2130c38648f38c81cc752116bd7682885f090c8c41b985
 job_name: test-claudesdk-cloudrun
 task_timeout_seconds: 1800
 question_timeout_seconds: 300

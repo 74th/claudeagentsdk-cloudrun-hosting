@@ -1,11 +1,17 @@
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 import cas_hosting_adapter.factory as factory
+from cas_hosting_adapter import ClaudeAgentConfig, RuntimePolicy
 from cas_hosting_adapter.batch_backend import CloudBatchBackend
 from cas_hosting_adapter.cloud_run_backend import CloudRunJobsBackend
-from cas_hosting_adapter.factory import GoogleCloudClients, GoogleCloudSettings
+from cas_hosting_adapter.factory import (
+    GoogleCloudClients,
+    GoogleCloudJobComposition,
+    GoogleCloudSettings,
+)
 
 
 class FakeBatchClient:
@@ -21,6 +27,39 @@ class FakeBatchClient:
 
 class FakeChatStore:
     pass
+
+
+@pytest.mark.asyncio
+async def test_job_composition_passes_optional_usage_hook_to_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeAdapter:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def run_job(self, invocation: object) -> int:
+            captured["invocation"] = invocation
+            return 7
+
+    import cas_hosting_adapter.agent_adapter as agent_adapter
+
+    monkeypatch.setattr(agent_adapter, "ClaudeAgentAdapter", FakeAdapter)
+    def usage_hook(_record: object) -> None:
+        pass
+    composition = GoogleCloudJobComposition(
+        chat_store=FakeChatStore(), workspace_store=object(), runtime_policy=RuntimePolicy()
+    )
+
+    result = await composition.run_from_environment(
+        ClaudeAgentConfig(model="model"),
+        usage_hook=usage_hook,
+        environment={"RUN_ID": str(uuid4()), "CLOUD_RUN_EXECUTION": "execution-1"},
+    )
+
+    assert result == 7
+    assert captured["usage_hook"] is usage_hook
 
 
 def test_google_cloud_settings_rejects_cross_region_job_name() -> None:

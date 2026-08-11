@@ -1,4 +1,7 @@
+import asyncio
+import logging
 import sys
+from datetime import timedelta
 from pathlib import Path
 from types import ModuleType
 
@@ -17,6 +20,8 @@ class ResultMessage:
     session_id = "claude-session"
     result = "done"
     is_error = False
+    total_cost_usd = None
+    duration_ms = None
 
 
 class FakeOptions:
@@ -94,6 +99,154 @@ async def test_run_job_owns_lifecycle_and_applies_setup_once_per_run(fake_sdk: N
     assert store.get_run_for_job(second.id).state is RunState.COMPLETED
     assert FakeOptions.captured[-1]["system_prompt"] == "system"
     assert FakeOptions.captured[-1]["allowed_tools"] == ["Read"]
+
+
+@pytest.mark.asyncio
+async def test_run_job_notifies_usage_after_terminal_commit(
+    fake_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ResultMessage, "total_cost_usd", 0.012345)
+    monkeypatch.setattr(ResultMessage, "duration_ms", 1234)
+    store = InMemoryChatStore()
+    workspace_store = InMemoryWorkspaceStore()
+    session = store.put_session(
+        Session(id="s", user_id="user@example.com", workspace_id="w", title="Repo task")
+    )
+    run = _new_run(store, session=session, key="usage")
+    records = []
+
+    adapter = ClaudeAgentAdapter(
+        chat_store=store,
+        workspace_store=workspace_store,
+        agent_config=ClaudeAgentConfig(model="model"),
+        usage_hook=records.append,
+    )
+
+    assert await adapter.run_job(JobInvocation(run.id, "execution-1")) == 0
+
+    committed = store.get_run_for_job(run.id)
+    assert committed.state is RunState.COMPLETED
+    assert len(records) == 1
+    record = records[0]
+    assert record.user_name == "user@example.com"
+    assert record.run_id == run.id
+    assert record.session_name == "Repo task"
+    assert record.estimated_cost_usd == 0.012345
+    assert record.duration_ms == 1234
+    assert record.recorded_at == committed.finished_at
+    assert record.recorded_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_usage_hook_failure_does_not_change_success_or_exit_code(
+    fake_sdk: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = InMemoryChatStore()
+    workspace_store = InMemoryWorkspaceStore()
+    session = store.put_session(Session(id="s", user_id="u", workspace_id="w"))
+    run = _new_run(store, session=session, key="hook-failure")
+
+    def failing_hook(_record: object) -> None:
+        raise RuntimeError("telemetry unavailable")
+
+    caplog.set_level(logging.ERROR, logger="cas_hosting_adapter.agent_adapter")
+    adapter = ClaudeAgentAdapter(
+        chat_store=store,
+        workspace_store=workspace_store,
+        agent_config=ClaudeAgentConfig(model="model"),
+        usage_hook=failing_hook,
+    )
+
+    assert await adapter.run_job(JobInvocation(run.id, "execution-1")) == 0
+    assert store.get_run_for_job(run.id).state is RunState.COMPLETED
+    assert f"agent.usage_hook.failed run_id={run.id}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_run_notifies_usage_from_persisted_error_event(
+    fake_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ResultMessage, "is_error", True)
+    monkeypatch.setattr(ResultMessage, "total_cost_usd", 0.045)
+    monkeypatch.setattr(ResultMessage, "duration_ms", 2500)
+    store = InMemoryChatStore()
+    workspace_store = InMemoryWorkspaceStore()
+    session = store.put_session(Session(id="s", user_id="u", workspace_id="w", title="Failed task"))
+    run = _new_run(store, session=session, key="failed-usage")
+    records = []
+    adapter = ClaudeAgentAdapter(
+        chat_store=store,
+        workspace_store=workspace_store,
+        agent_config=ClaudeAgentConfig(model="model"),
+        usage_hook=records.append,
+    )
+
+    assert await adapter.run_job(JobInvocation(run.id, "execution-1")) == 1
+    assert store.get_run_for_job(run.id).state is RunState.FAILED
+    assert len(records) == 1
+    assert records[0].session_name == "Failed task"
+    assert records[0].estimated_cost_usd == 0.045
+    assert records[0].duration_ms == 2500
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_notifies_once_with_missing_sdk_usage(fake_sdk: None) -> None:
+    store = InMemoryChatStore()
+    workspace_store = InMemoryWorkspaceStore()
+    session = store.put_session(Session(id="s", user_id="u", workspace_id="w", title="Cancelled"))
+    run = _new_run(store, session=session, key="cancelled-usage")
+    records = []
+
+    def request_cancel(_path: Path) -> None:
+        store.request_cancel(run.id)
+
+    adapter = ClaudeAgentAdapter(
+        chat_store=store,
+        workspace_store=workspace_store,
+        agent_config=ClaudeAgentConfig(model="model"),
+        workspace_setup=request_cancel,
+        usage_hook=records.append,
+    )
+
+    assert await adapter.run_job(JobInvocation(run.id, "execution-1")) == 1
+    assert store.get_run_for_job(run.id).state is RunState.CANCELLED
+    assert len(records) == 1
+    assert records[0].estimated_cost_usd is None
+    assert records[0].duration_ms is None
+
+
+@pytest.mark.asyncio
+async def test_timed_out_run_notifies_with_missing_sdk_usage(
+    fake_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = sys.modules["claude_agent_sdk"]
+
+    async def delayed_query(*, prompt: str, options: FakeOptions):
+        del prompt, options
+        await asyncio.sleep(0.1)
+        yield ResultMessage()
+
+    monkeypatch.setattr(module, "query", delayed_query)
+    store = InMemoryChatStore()
+    workspace_store = InMemoryWorkspaceStore()
+    session = store.put_session(Session(id="s", user_id="u", workspace_id="w", title="Timeout"))
+    run = _new_run(store, session=session, key="timeout-usage")
+    records = []
+    adapter = ClaudeAgentAdapter(
+        chat_store=store,
+        workspace_store=workspace_store,
+        agent_config=ClaudeAgentConfig(model="model"),
+        runtime_policy=RuntimePolicy(
+            max_runtime=timedelta(milliseconds=1), idle_timeout=timedelta(seconds=1)
+        ),
+        usage_hook=records.append,
+    )
+
+    assert await adapter.run_job(JobInvocation(run.id, "execution-1")) == 1
+    assert store.get_run_for_job(run.id).state is RunState.TIMED_OUT
+    assert len(records) == 1
+    assert records[0].estimated_cost_usd is None
+    assert records[0].duration_ms is None
 
 
 @pytest.mark.asyncio

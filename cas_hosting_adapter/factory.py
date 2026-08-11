@@ -15,7 +15,13 @@ from .firestore_chat_store import FirestoreChatStore
 from .firestore_codec import DEFAULT_RETENTION_DAYS
 from .gke_backend import GKEJobsBackend, KubernetesBatchClient, create_kubernetes_batch_client
 from .protocols import AgentFactory, ChatStore, Clock, ExecutionBackend, WorkspaceStore
-from .runtime import ClaudeAgentConfig, RuntimePolicy, WorkspaceInitializer, WorkspaceSetup
+from .runtime import (
+    ClaudeAgentConfig,
+    RuntimePolicy,
+    UsageHook,
+    WorkspaceInitializer,
+    WorkspaceSetup,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -164,6 +170,7 @@ class GoogleCloudJobComposition:
         *,
         workspace_initializer: WorkspaceInitializer | None = None,
         workspace_setup: WorkspaceSetup | None = None,
+        usage_hook: UsageHook | None = None,
         environment: dict[str, str] | None = None,
     ) -> int:
         from .agent_adapter import ClaudeAgentAdapter
@@ -177,6 +184,7 @@ class GoogleCloudJobComposition:
             runtime_policy=self.runtime_policy,
             workspace_initializer=workspace_initializer,
             workspace_setup=workspace_setup,
+            usage_hook=usage_hook,
         )
         return await adapter.run_job(invocation)
 
