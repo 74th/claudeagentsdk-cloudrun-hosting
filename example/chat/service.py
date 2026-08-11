@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 from cas_hosting_adapter.control_client import ControlClient
 from cas_hosting_adapter.errors import ExecutionTemporaryError
 from cas_hosting_adapter.factory import GoogleCloudSettings, create_google_cloud_control_client
+from cas_hosting_adapter.gke_backend import GKEToleration
 from cas_hosting_adapter.models import (
     ChatEvent,
     QuestionRequest,
@@ -343,6 +344,19 @@ def create_control_client_from_release_config(path: Path) -> ControlClient:
         gke_cpu=release.gke.cpu if release.gke is not None else "1",
         gke_memory=release.gke.memory if release.gke is not None else "2Gi",
         gke_job_ttl_seconds=release.gke.job_ttl_seconds if release.gke is not None else 3600,
+        gke_tolerations=(
+            tuple(
+                GKEToleration(
+                    key=toleration.key,
+                    operator=toleration.operator,
+                    value=toleration.value,
+                    effect=toleration.effect,
+                )
+                for toleration in release.gke.tolerations
+            )
+            if release.gke is not None
+            else ()
+        ),
         task_timeout_seconds=release.task_timeout_seconds,
         question_timeout_seconds=release.question_timeout_seconds,
         vertex_region=release.vertex_region,

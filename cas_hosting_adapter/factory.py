@@ -13,7 +13,12 @@ from .cloud_run_backend import CloudRunJobsBackend
 from .control_client import ControlClient
 from .firestore_chat_store import FirestoreChatStore
 from .firestore_codec import DEFAULT_RETENTION_DAYS
-from .gke_backend import GKEJobsBackend, KubernetesBatchClient, create_kubernetes_batch_client
+from .gke_backend import (
+    GKEJobsBackend,
+    GKEToleration,
+    KubernetesBatchClient,
+    create_kubernetes_batch_client,
+)
 from .protocols import AgentFactory, ChatStore, Clock, ExecutionBackend, WorkspaceStore
 from .runtime import (
     ClaudeAgentConfig,
@@ -69,6 +74,7 @@ class GoogleCloudSettings:
     gke_cpu: str = "1"
     gke_memory: str = "2Gi"
     gke_job_ttl_seconds: int = 3600
+    gke_tolerations: tuple[GKEToleration, ...] = ()
 
     @classmethod
     def from_environment(
@@ -142,6 +148,10 @@ class GoogleCloudSettings:
                 raise ValueError("GKE CPU and memory must not be blank")
             if not 1 <= self.gke_job_ttl_seconds <= 86400:
                 raise ValueError("gke_job_ttl_seconds must be between 1 and 86400")
+        resolved_tolerations = tuple(self.gke_tolerations)
+        if any(not isinstance(toleration, GKEToleration) for toleration in resolved_tolerations):
+            raise ValueError("gke_tolerations must be GKEToleration values")
+        object.__setattr__(self, "gke_tolerations", resolved_tolerations)
 
 
 @dataclass(frozen=True)
@@ -269,6 +279,7 @@ def create_google_cloud_control_client(settings: GoogleCloudSettings) -> Control
             memory=settings.gke_memory,
             task_timeout_seconds=settings.task_timeout_seconds,
             job_ttl_seconds=settings.gke_job_ttl_seconds,
+            tolerations=settings.gke_tolerations,
             environment={
                 "GOOGLE_CLOUD_PROJECT": settings.project,
                 "CLAUDE_CODE_USE_VERTEX": "1",

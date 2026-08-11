@@ -12,6 +12,7 @@ from cas_hosting_adapter.factory import (
     GoogleCloudJobComposition,
     GoogleCloudSettings,
 )
+from cas_hosting_adapter.gke_backend import GKEJobsBackend, GKEToleration
 
 
 class FakeBatchClient:
@@ -104,3 +105,33 @@ def test_factory_injects_only_the_selected_execution_backend(
         assert isinstance(backend, CloudRunJobsBackend)
     else:
         assert isinstance(backend, CloudBatchBackend)
+
+
+def test_factory_forwards_gke_tolerations_to_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tolerations = (GKEToleration("dedicated", "Exists", "", "NoSchedule"),)
+    settings = GoogleCloudSettings(
+        project="project",
+        region="us-central1",
+        firestore_database="claude-agent-chat",
+        bucket_name="bucket",
+        execution_platform="gke",
+        image="image",
+        gke_cluster="autopilot",
+        gke_cluster_region="asia-northeast1",
+        gke_kube_context="context",
+        gke_tolerations=tolerations,
+    )
+    clients = GoogleCloudClients(
+        firestore=object(),
+        storage=object(),
+        kubernetes_batch=object(),
+    )
+    monkeypatch.setattr(factory, "create_google_cloud_clients", lambda _: clients)
+    monkeypatch.setattr(factory, "FirestoreChatStore", lambda *args, **kwargs: FakeChatStore())
+
+    control_client = factory.create_google_cloud_control_client(settings)
+
+    assert isinstance(control_client._execution_backend, GKEJobsBackend)
+    assert control_client._execution_backend._spec.tolerations == tolerations  # type: ignore[attr-defined]

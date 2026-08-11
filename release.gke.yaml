@@ -8,7 +8,7 @@ region: us-central1
 firestore_location: us-central1
 firestore_database: claude-agent-chat
 bucket_name: nnyn-dev-agent-hosting-poc-us-central1
-image: us-central1-docker.pkg.dev/nnyn-dev/claude-agent/agent@sha256:af057dfac886b36bb625538e261690d054c4d04c65a7b587597441d52375f6e8
+image: us-central1-docker.pkg.dev/nnyn-dev/claude-agent/agent@sha256:a691e379c40fec1f9e979f7f9ab4841ef98f0fbc7ebff485a374c7111f514659
 task_timeout_seconds: 1800
 question_timeout_seconds: 300
 task_retries: 0
@@ -25,3 +25,8 @@ gke:
   cpu: "1"
   memory: 2Gi
   job_ttl_seconds: 3600
+#   tolerations:
+#     - key: dedicated
+#       operator: Exists
+#       value: ""
+#       effect: NoSchedule

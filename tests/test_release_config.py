@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from cas_hosting_adapter.release_config import ReleaseConfig, load_release_config
+from cas_hosting_adapter.release_config import (
+    GKEReleaseToleration,
+    ReleaseConfig,
+    load_release_config,
+)
 
 
 def test_example_release_config_is_valid() -> None:
@@ -99,6 +103,70 @@ def test_gke_release_config_keeps_cluster_location_independent() -> None:
     assert variables["gke_cluster_region"] == "asia-northeast1"
     assert variables["region"] == "us-central1"
     assert variables["enable_gke"] is True
+
+
+def test_gke_release_config_parses_tolerations_in_order() -> None:
+    config = ReleaseConfig(
+        schema_version="4",
+        project_id="p",
+        region="us-central1",
+        firestore_location="us-central1",
+        firestore_database="claude-agent-chat",
+        bucket_name="bucket",
+        image="image",
+        execution_platform="gke",
+        enable_gke=True,
+        gke={
+            "cluster": "autopilot",
+            "cluster_region": "asia-northeast1",
+            "kube_context": "context",
+            "tolerations": [
+                {
+                    "key": "dedicated",
+                    "operator": "Exists",
+                    "value": "",
+                    "effect": "NoSchedule",
+                },
+                {
+                    "key": "workload",
+                    "operator": "Equal",
+                    "value": "agent",
+                    "effect": "NoExecute",
+                },
+            ],
+        },
+    )
+    assert isinstance(config.gke.tolerations, tuple)
+    assert [toleration.key for toleration in config.gke.tolerations] == [
+        "dedicated",
+        "workload",
+    ]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"key": "dedicated", "operator": "In", "value": "", "effect": "NoSchedule"},
+        {"key": "dedicated", "operator": "Equal", "value": "", "effect": "Invalid"},
+        {"key": "dedicated", "operator": "Exists", "value": "agent", "effect": "NoSchedule"},
+        {
+            "key": "dedicated",
+            "operator": "Exists",
+            "value": "",
+            "effect": "NoSchedule",
+            "unexpected": "field",
+        },
+    ],
+)
+def test_gke_release_config_rejects_invalid_tolerations(values: dict[str, str]) -> None:
+    with pytest.raises(ValueError):
+        GKEReleaseToleration.model_validate(values)
+
+
+def test_gke_release_config_defaults_tolerations_to_empty_tuple() -> None:
+    config = load_release_config(Path("release.gke.yaml"))
+    assert config.gke is not None
+    assert config.gke.tolerations == ()
 
 
 def test_gke_requires_its_enable_flag_and_rejects_secrets() -> None:
