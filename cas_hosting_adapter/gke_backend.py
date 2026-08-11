@@ -43,9 +43,41 @@ class GKEJobSpec:
     timeout_seconds: int
     ttl_seconds_after_finished: int
     environment: dict[str, str]
+    tolerations: tuple[GKEToleration, ...] = ()
     backoff_limit: int = 0
     parallelism: int = 1
     completions: int = 1
+
+
+@dataclass(frozen=True)
+class GKEToleration:
+    """Immutable, SDK-independent representation of a Kubernetes toleration."""
+
+    key: str
+    operator: str
+    value: str
+    effect: str
+
+    def __post_init__(self) -> None:
+        fields = (self.key, self.operator, self.value, self.effect)
+        if not all(isinstance(field, str) for field in fields):
+            raise ConfigurationError("GKE toleration fields must be strings")
+        if self.operator not in {"Equal", "Exists"}:
+            raise ConfigurationError("GKE toleration operator must be Equal or Exists")
+        if self.effect not in {"NoSchedule", "PreferNoSchedule", "NoExecute"}:
+            raise ConfigurationError(
+                "GKE toleration effect must be NoSchedule, PreferNoSchedule, or NoExecute"
+            )
+        if self.operator == "Exists" and self.value != "":
+            raise ConfigurationError("GKE toleration value must be empty when operator is Exists")
+
+    def as_manifest(self) -> dict[str, str]:
+        return {
+            "key": self.key,
+            "operator": self.operator,
+            "value": self.value,
+            "effect": self.effect,
+        }
 
 
 class KubernetesBatchClient(Protocol):
@@ -110,6 +142,7 @@ class GKEJobsBackend:
         task_timeout_seconds: int = 1800,
         job_ttl_seconds: int = 3600,
         environment: dict[str, str] | None = None,
+        tolerations: tuple[GKEToleration, ...] | list[GKEToleration] = (),
         cancel_poll_attempts: int = 60,
         cancel_poll_interval_seconds: float = 0.5,
     ) -> None:
@@ -123,6 +156,9 @@ class GKEJobsBackend:
             raise ConfigurationError("job_ttl_seconds must be positive")
         if cancel_poll_attempts < 1 or cancel_poll_interval_seconds < 0:
             raise ConfigurationError("invalid GKE cancellation polling settings")
+        resolved_tolerations = tuple(tolerations)
+        if any(not isinstance(toleration, GKEToleration) for toleration in resolved_tolerations):
+            raise ConfigurationError("GKE tolerations must be GKEToleration values")
         self._client = client
         self._namespace = namespace
         self._service_account = service_account
@@ -135,6 +171,7 @@ class GKEJobsBackend:
             timeout_seconds=task_timeout_seconds,
             ttl_seconds_after_finished=job_ttl_seconds,
             environment=dict(environment or {}),
+            tolerations=resolved_tolerations,
         )
         self._cancel_poll_attempts = cancel_poll_attempts
         self._cancel_poll_interval_seconds = cancel_poll_interval_seconds
@@ -167,6 +204,34 @@ class GKEJobsBackend:
             if any(token in name.lower() for token in _FORBIDDEN_ENVIRONMENT_TOKENS):
                 raise ConfigurationError(f"forbidden secret or input environment variable: {name}")
         labels = {RUN_ID_LABEL: str(run_id), EXECUTION_LABEL: "claude-agent"}
+        pod_spec: dict[str, Any] = {
+            "serviceAccountName": self._spec.service_account,
+            "restartPolicy": "Never",
+            "containers": [
+                {
+                    "name": "agent",
+                    "image": self._spec.image,
+                    "env": [
+                        {"name": name, "value": value}
+                        for name, value in environment.items()
+                    ],
+                    "resources": {
+                        "requests": {
+                            "cpu": self._spec.cpu,
+                            "memory": self._spec.memory,
+                        },
+                        "limits": {
+                            "cpu": self._spec.cpu,
+                            "memory": self._spec.memory,
+                        },
+                    },
+                }
+            ],
+        }
+        if self._spec.tolerations:
+            pod_spec["tolerations"] = [
+                toleration.as_manifest() for toleration in self._spec.tolerations
+            ]
         return {
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -179,30 +244,7 @@ class GKEJobsBackend:
                 "ttlSecondsAfterFinished": self._spec.ttl_seconds_after_finished,
                 "template": {
                     "metadata": {"labels": labels},
-                    "spec": {
-                        "serviceAccountName": self._spec.service_account,
-                        "restartPolicy": "Never",
-                        "containers": [
-                            {
-                                "name": "agent",
-                                "image": self._spec.image,
-                                "env": [
-                                    {"name": name, "value": value}
-                                    for name, value in environment.items()
-                                ],
-                                "resources": {
-                                    "requests": {
-                                        "cpu": self._spec.cpu,
-                                        "memory": self._spec.memory,
-                                    },
-                                    "limits": {
-                                        "cpu": self._spec.cpu,
-                                        "memory": self._spec.memory,
-                                    },
-                                },
-                            }
-                        ],
-                    },
+                    "spec": pod_spec,
                 },
             },
         }

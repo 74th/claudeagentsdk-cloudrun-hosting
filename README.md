@@ -51,6 +51,15 @@ kubectl config get-contexts
 
 `release.gke.yaml` の `execution_platform: gke` と `gke` block は frontend の backend 選択、`terraform/test-gke.tfvars` の `enable_gke` は基盤作成を制御します。release YAML や Terraform state に kubeconfig の内容・鍵・token を保存しません。適用前に GKE 用 plan を確認します。
 
+GKE Job の Pod へ toleration を追加する場合は、`gke.tolerations` に `key`、`operator`（`Equal` または `Exists`）、`value`、`effect`（`NoSchedule`、`PreferNoSchedule`、`NoExecute`）を指定します。`operator: Exists` の `value` は空文字列にしてください。`release.gke.yaml` には `dedicated` taint を許容する設定例をコメントで残しています。
+
+toleration は taint を許容する条件であり、それだけで特定の NodePool を選択するものではありません。対象 NodePool の taint 構成や node affinity／node selector と組み合わせてください。設定値はリリース読み込み時と Job 作成前に検証され、manifest の確認は次のように行えます。
+
+```bash
+uv run pytest tests/test_release_config.py tests/test_factory_and_boundaries.py tests/test_gke_backend.py
+kubectl -n claude-agent get pod <pod-name> -o yaml
+```
+
 ```bash
 uv run python scripts/deploy.py release.gke.yaml
 uv run python scripts/deploy.py release.gke.yaml --apply

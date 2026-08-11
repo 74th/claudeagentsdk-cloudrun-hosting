@@ -24,6 +24,21 @@ class CloudBatchReleaseSettings(BaseModel):
     memory_mib: int = Field(default=4096, ge=1)
 
 
+class GKEReleaseToleration(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    key: str
+    operator: Literal["Equal", "Exists"]
+    value: str
+    effect: Literal["NoSchedule", "PreferNoSchedule", "NoExecute"]
+
+    @model_validator(mode="after")
+    def validate_exists_value(self) -> GKEReleaseToleration:
+        if self.operator == "Exists" and self.value != "":
+            raise ValueError("GKE toleration value must be empty when operator is Exists")
+        return self
+
+
 class GKEReleaseSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -35,6 +50,7 @@ class GKEReleaseSettings(BaseModel):
     cpu: str = Field(default="1", min_length=1)
     memory: str = Field(default="2Gi", min_length=1)
     job_ttl_seconds: int = Field(default=3600, ge=1, le=86400)
+    tolerations: tuple[GKEReleaseToleration, ...] = ()
 
     @model_validator(mode="before")
     @classmethod

@@ -3,6 +3,7 @@ from uuid import uuid4
 import pytest
 
 from cas_hosting_adapter.errors import (
+    ConfigurationError,
     ExecutionConflictError,
     ExecutionNotFoundError,
     ExecutionPermissionError,
@@ -10,7 +11,11 @@ from cas_hosting_adapter.errors import (
     ExecutionTemporaryError,
     ValidationError,
 )
-from cas_hosting_adapter.gke_backend import GKEJobsBackend, normalize_gke_job_state
+from cas_hosting_adapter.gke_backend import (
+    GKEJobsBackend,
+    GKEToleration,
+    normalize_gke_job_state,
+)
 from cas_hosting_adapter.models import ExecutionReference, ExecutionState
 
 
@@ -52,13 +57,17 @@ class FakeKubernetesClient:
         return object()
 
 
-def backend(client: FakeKubernetesClient) -> GKEJobsBackend:
+def backend(
+    client: FakeKubernetesClient,
+    tolerations: tuple[GKEToleration, ...] = (),
+) -> GKEJobsBackend:
     return GKEJobsBackend(
         client,
         image="image@sha256:digest",
         cancel_poll_attempts=2,
         cancel_poll_interval_seconds=0,
         environment={"GOOGLE_CLOUD_PROJECT": "project"},
+        tolerations=tolerations,
     )
 
 
@@ -85,6 +94,65 @@ def test_job_manifest_is_single_non_retrying_run_with_safe_environment() -> None
         "CLOUD_RUN_EXECUTION": reference.name,
     }
     assert manifest["metadata"]["labels"]["run-id"] == str(run_id)  # type: ignore[index]
+    assert "tolerations" not in pod  # type: ignore[operator]
+
+
+def test_job_manifest_preserves_multiple_tolerations_and_exists_value() -> None:
+    client = FakeKubernetesClient()
+    tolerations = (
+        GKEToleration("dedicated", "Exists", "", "NoSchedule"),
+        GKEToleration("workload", "Equal", "agent", "PreferNoSchedule"),
+    )
+    backend(client, tolerations).start(uuid4())
+    pod = client.created[0]["spec"]["template"]["spec"]  # type: ignore[index]
+    assert pod["tolerations"] == [  # type: ignore[index]
+        {"key": "dedicated", "operator": "Exists", "value": "", "effect": "NoSchedule"},
+        {
+            "key": "workload",
+            "operator": "Equal",
+            "value": "agent",
+            "effect": "PreferNoSchedule",
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "toleration",
+    [
+        GKEToleration("key", "Equal", "value", "NoSchedule"),
+    ],
+)
+def test_gke_toleration_is_immutable(toleration: GKEToleration) -> None:
+    with pytest.raises(AttributeError):
+        toleration.key = "changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ("key", "In", "", "NoSchedule"),
+        ("key", "Equal", "", "Invalid"),
+        ("key", "Exists", "agent", "NoSchedule"),
+    ],
+)
+def test_gke_toleration_defensively_rejects_invalid_values(
+    values: tuple[str, str, str, str],
+) -> None:
+    with pytest.raises(ConfigurationError):
+        GKEToleration(*values)
+
+
+def test_backend_rejects_non_value_object_tolerations_before_create() -> None:
+    client = FakeKubernetesClient()
+    with pytest.raises(ConfigurationError, match="GKEToleration"):
+        GKEJobsBackend(
+            client,
+            image="image@sha256:digest",
+            tolerations=(  # type: ignore[arg-type]
+                {"key": "dedicated", "operator": "In", "value": "", "effect": "NoSchedule"},
+            ),
+        )
+    assert client.created == []
 
 
 def test_start_is_idempotent_and_conflict_recovers_same_run() -> None:
