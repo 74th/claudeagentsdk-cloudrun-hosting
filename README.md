@@ -16,7 +16,7 @@ Claude Agent SDK を使った長時間実行エージェントを、利用者自
 
 ```mermaid
 flowchart LR
-    User[利用者] --> Frontend[Slack・Streamlit などのフロントエンド]
+    User[利用者] --> Frontend[Slack・Streamlit 等]
 
     subgraph Control[コントロールプレーン]
         Frontend -->|session / run の作成<br/>履歴・イベントの購読| Firestore[(Firestore<br/>会話・run・イベント)]
