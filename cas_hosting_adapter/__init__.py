@@ -1,4 +1,4 @@
-"""Claude Agent SDK adapter for Cloud Run Jobs."""
+"""Claude Agent SDK on Google Cloud Hosting."""
 
 from .control_client import ControlClient
 from .models import (

@@ -1,8 +1,8 @@
-# Claude Agent SDK on Cloud Run Jobs
+# Claude Agent SDK on Google Cloud Hosting
 
-1 run は 1 Cloud Run Execution として起動します。Control plane は Firestore の user / session / run / event を正本とし、workspace と Claude transcript は GCS の不変 snapshot として保存します。
+Claude Agent SDK を Google Cloud 上でホストするための実装です。Cloud Run Jobs、Cloud Batch、GKE Jobs を実行バックエンドとして選択でき、1 run は選択した基盤上の 1 Job として起動します。Control plane は Firestore の user / session / run / event を正本とし、workspace と Claude transcript は GCS の不変 snapshot として保存します。
 
-公開 provider port は `ExecutionBackend`、`ChatStore`、`WorkspaceStore` です。Cloud Run Execution は at-least-once で起動され得ますが、JobRunner の owner claim により Claude 実行は同時に 1 件へ制限します。
+公開 provider port は `ExecutionBackend`、`ChatStore`、`WorkspaceStore` です。実行バックエンドは at-least-once で起動され得ますが、JobRunner の owner claim により Claude 実行は同時に 1 件へ制限します。
 
 識別子は user ID、session ID、run ID、execution reference、Claude session ID、workspace ID を分離します。Firestore は `users/{user-hash}/sessions/{session}/runs/{run}/events/{event}` を保存し、event は `(sequence, event_id)` で順序付けます。run は `requested → dispatching → pending → running` から `completed`、`failed`、`cancelled`、`timed_out`、`dispatch_failed` のいずれかへ遷移します。
 
@@ -76,7 +76,7 @@ gcloud projects get-iam-policy nnyn-dev \
 
 rollback は `execution_platform: cloud-run` または `cloud-batch` の release 設定へ戻して frontend を再起動します。GKE 専用 namespace／KSA／IAM を除去する場合は active Job がないことを確認し、`enable_gke=false` の Terraform plan／apply を実行します。既存の Cloud Run／Batch を維持する場合は各 enable flag を変更しません。
 
-Cloud Run Job image は `example/Dockerfile` で build し、release 設定の image を更新して配備します。Job は `RUN_ID` だけを受け取り、入力・イベント・cancel flag は Firestore から取得します。サンプルは `example/agent`、`example/streamlit_frontend`、`example/slackbot_frontend` に分離されています。旧 `example/agent.py` と `sample_frontend` は廃止しました。
+Job image は `example/Dockerfile` で build し、release 設定の image を更新して配備します。Job は `RUN_ID` だけを受け取り、入力・イベント・cancel flag は Firestore から取得します。サンプルは `example/agent`、`example/streamlit_frontend`、`example/slackbot_frontend` に分離されています。旧 `example/agent.py` と `sample_frontend` は廃止しました。
 
 この構成はプロジェクトの `(default)` database を作成・利用・変更しません。また、既存の `(default)` 内データを `claude-agent-chat` へ自動移行しません。既存データが必要な場合は、別途承認した移行手順を実施してください。
 
@@ -88,7 +88,7 @@ uv sync --group streamlit
 uv run streamlit run example/streamlit_frontend/app.py
 ```
 
-サイドバーで `Release config` と `User ID` を指定すると、Firestore の session / run / event と Cloud Run Job の開始・cancel へ接続します。
+サイドバーで `Release config` と `User ID` を指定すると、Firestore の session / run / event と、設定した実行バックエンドの Job 開始・cancel へ接続します。
 
 ## サンプルとストリーミング確認
 

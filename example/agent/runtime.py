@@ -1,4 +1,4 @@
-"""Small Cloud Run Job composition root for the sample agent."""
+"""Small Google Cloud job composition root for the sample agent."""
 
 from __future__ import annotations
 

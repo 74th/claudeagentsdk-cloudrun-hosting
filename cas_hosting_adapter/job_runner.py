@@ -1,4 +1,4 @@
-"""Cloud Run Job entry boundary; validates only non-secret run coordinates."""
+"""Job entry boundary; validates only non-secret run coordinates."""
 from __future__ import annotations
 
 import asyncio
