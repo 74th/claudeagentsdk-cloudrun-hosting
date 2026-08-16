@@ -1,5 +1,5 @@
 def main():
-    print("Hello from claude-agent-sdk-gemini-enterprise-agent-platform-hosting!")
+    print("Hello from Claude Agent SDK on Google Cloud Hosting!")
 
 
 if __name__ == "__main__":

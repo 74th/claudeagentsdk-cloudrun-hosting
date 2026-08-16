@@ -1,1 +1,1 @@
-"""Runnable Cloud Run Job sample."""
+"""Runnable Google Cloud job sample."""
